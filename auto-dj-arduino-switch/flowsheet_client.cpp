@@ -1,5 +1,6 @@
 #include "flowsheet_client.h"
 #include "config.h"
+#include "utils.h"
 
 #include <WiFi.h>
 #include <WiFiSSLClient.h>
@@ -10,26 +11,6 @@ FlowsheetClient::FlowsheetClient(const char* host, int port, const char* apiKey)
     , port(port)
     , apiKey(apiKey)
 {
-}
-
-// ========== URL Encoding ==========
-
-String FlowsheetClient::urlEncode(const String& str) {
-    String encoded;
-    encoded.reserve(str.length() * 2);
-    for (unsigned int i = 0; i < str.length(); i++) {
-        char c = str.charAt(i);
-        if (isAlphaNumeric(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            encoded += c;
-        } else if (c == ' ') {
-            encoded += '+';
-        } else {
-            encoded += '%';
-            if ((unsigned char)c < 0x10) encoded += '0';
-            encoded += String((unsigned char)c, HEX);
-        }
-    }
-    return encoded;
 }
 
 // ========== HTTP Helpers ==========
@@ -117,25 +98,10 @@ int FlowsheetClient::startShow(unsigned long startingHourMs) {
         return -1;
     }
 
-    // Parse radioShowID from Location: /playlists/flowsheet?mode=modifyFlowsheet&radioShowID=123
-    int idx = location.indexOf("radioShowID=");
-    if (idx < 0) {
-        Serial.print("[Flowsheet] radioShowID not found in Location: ");
-        Serial.println(location);
-        return -1;
-    }
-
-    String idStr = location.substring(idx + 12); // length of "radioShowID="
-    // Trim any trailing parameters
-    int ampIdx = idStr.indexOf('&');
-    if (ampIdx >= 0) {
-        idStr = idStr.substring(0, ampIdx);
-    }
-
-    int radioShowID = idStr.toInt();
-    if (radioShowID <= 0) {
+    int radioShowID = parseRadioShowID(location);
+    if (radioShowID < 0) {
         Serial.print("[Flowsheet] Failed to parse radioShowID from: ");
-        Serial.println(idStr);
+        Serial.println(location);
         return -1;
     }
 

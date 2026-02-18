@@ -41,7 +41,6 @@ private:
     int port;
     const char* apiKey;
 
-    String urlEncode(const String& str);
     int postForm(const char* path, const String& body);
     String getLocationHeader(const char* path, const String& body);
 };
