@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Arduino build artifacts
+build/
+*.elf
+*.hex
+*.bin
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Secrets (contains WiFi password and API key)
+auto-dj-arduino-switch/secrets.h
