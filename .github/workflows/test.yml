@@ -1,0 +1,22 @@
+name: Desktop Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B test/build test/
+
+      - name: Build
+        run: cmake --build test/build
+
+      - name: Run tests
+        run: cd test/build && ctest --output-on-failure

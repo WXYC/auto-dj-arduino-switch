@@ -111,6 +111,19 @@ To rotate the API key, update both:
 1. `secrets.h` on the Arduino
 2. `AUTO_DJ_API_KEY` env var on the tubafrenzy server
 
+## Running Tests
+
+Pure logic functions (`urlEncode`, `parseRadioShowID`, `currentHourMs`) are extracted into `utils.h`/`utils.cpp` and tested on desktop using GoogleTest with a minimal Arduino `String` shim. No Arduino hardware or SDK required.
+
+```bash
+cd test
+cmake -B build
+cmake --build build
+cd build && ctest --output-on-failure
+```
+
+Tests run automatically on push and PR via GitHub Actions (`.github/workflows/test.yml`).
+
 ## Known Limitations
 
 - **WiFi reconnection blocks for ~36 seconds** (known Giga R1 firmware limitation). During this time, the state machine is frozen. Track changes during a WiFi outage are not logged retroactively.

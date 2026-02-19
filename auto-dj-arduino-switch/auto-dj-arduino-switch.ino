@@ -17,6 +17,7 @@
 #include "wifi_manager.h"
 #include "azuracast_client.h"
 #include "flowsheet_client.h"
+#include "utils.h"
 
 // ========== State Machine ==========
 
@@ -49,20 +50,6 @@ RelayMonitor relayMonitor(RELAY_PIN, STATUS_LED_PIN, DEBOUNCE_MS);
 WifiManager wifiManager(WIFI_SSID, WIFI_PASS, WIFI_RETRY_INTERVAL_MS);
 AzuraCastClient azuracast(AZURACAST_HOST, AZURACAST_PORT, AZURACAST_PATH);
 FlowsheetClient flowsheet(TUBAFRENZY_HOST, TUBAFRENZY_PORT, AUTO_DJ_API_KEY);
-
-// ========== Time Helpers ==========
-
-/**
- * Returns the current hour's epoch milliseconds (truncated to hour boundary).
- * Used for startingHour and workingHour parameters.
- */
-unsigned long currentHourMs() {
-    unsigned long epoch = wifiManager.getEpochTime();
-    if (epoch == 0) return 0;
-    // Truncate to hour boundary: subtract seconds-within-hour, convert to ms
-    unsigned long hourEpoch = epoch - (epoch % 3600);
-    return hourEpoch * 1000UL;
-}
 
 // ========== State Transitions ==========
 
@@ -146,7 +133,7 @@ void loop() {
             break;
 
         case STARTING_SHOW: {
-            unsigned long hourMs = currentHourMs();
+            unsigned long hourMs = currentHourMs(wifiManager.getEpochTime());
             if (hourMs == 0) {
                 Serial.println("[Error] No NTP time available, cannot start show.");
                 transitionTo(ERROR_STATE);
@@ -190,7 +177,7 @@ void loop() {
                 // If a live DJ is streaming to AzuraCast, skip flowsheet entries
                 // (the relay is the primary source of truth, but this is a safety check)
                 if (newTrack && !azuracast.isLiveDJ()) {
-                    unsigned long hourMs = currentHourMs();
+                    unsigned long hourMs = currentHourMs(wifiManager.getEpochTime());
                     if (hourMs > 0) {
                         flowsheet.addEntry(radioShowID, hourMs,
                             azuracast.getArtist(),
