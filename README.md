@@ -8,25 +8,29 @@ When auto DJ is playing and no DJ is logged into the flowsheet, those tracks are
 
 ## Architecture
 
-```
-Mixing Board           Arduino Giga R1 WiFi          AzuraCast
-AUX Relay    ------>   Detects auto DJ active  <----> remote.wxyc.org
-(dry contact)          via relay on D2                 (now playing API)
-                            |
-                            v
-                       tubafrenzy (wxyc.info)
-                       Flowsheet API
-                       (start show, add entries, end show)
+```mermaid
+flowchart LR
+    MB["Mixing Board\nAUX Relay\n(dry contact)"] -->|D2 pin| ARD["Arduino Giga R1 WiFi\nDetects auto DJ active\nvia relay on D2"]
+    ARD <-->|Now Playing API| AZ["AzuraCast\nremote.wxyc.org"]
+    ARD -->|Start show, add entries,\nend show| TF["tubafrenzy\nFlowsheet API\n(wxyc.info)"]
 ```
 
 ## State Machine
 
-```
-BOOTING -> CONNECTING_WIFI -> IDLE <-> STARTING_SHOW -> AUTO_DJ_ACTIVE -> ENDING_SHOW -> IDLE
-                                                              |
-                                                              v
-                                                    (polls AzuraCast every 20s,
-                                                     adds flowsheet entries)
+```mermaid
+stateDiagram-v2
+    [*] --> BOOTING
+    BOOTING --> CONNECTING_WIFI
+    CONNECTING_WIFI --> IDLE
+    IDLE --> STARTING_SHOW : Relay closed\n(auto DJ active)
+    STARTING_SHOW --> AUTO_DJ_ACTIVE
+    AUTO_DJ_ACTIVE --> ENDING_SHOW : Relay opened\n(DJ is live)
+    ENDING_SHOW --> IDLE
+
+    state AUTO_DJ_ACTIVE {
+        [*] --> Polling
+        Polling : Polls AzuraCast every 20s,\nadds flowsheet entries
+    }
 ```
 
 - **IDLE:** Relay open (DJ is live). Waiting for auto DJ activation.
