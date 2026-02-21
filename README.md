@@ -1,6 +1,6 @@
 # Auto DJ Arduino Switch
 
-An Arduino Giga R1 WiFi sketch that bridges the gap between WXYC's auto DJ system ([AzuraCast](https://remote.wxyc.org)) and the station's flowsheet ([tubafrenzy](https://www.wxyc.info)). When no live DJ is broadcasting, the Arduino detects this via a relay contact on the mixing board, polls AzuraCast for currently-playing track data, and writes entries to the tubafrenzy flowsheet.
+An Arduino Giga R1 WiFi sketch that bridges the gap between WXYC's auto DJ system ([AzuraCast](https://remote.wxyc.org)) and the station's flowsheet ([tubafrenzy](https://www.wxyc.info)). When no live DJ is broadcasting, the Arduino detects this via a relay contact on the mixing board, polls AzuraCast for currently-playing track data, and writes entries to the tubafrenzy flowsheet. A planned management server will relay AzuraCast's real-time Centrifugo feed over Ethernet, replacing polling with push-based updates (see [roadmap](docs/remote-access-roadmap.md)).
 
 ## Why?
 
@@ -15,6 +15,31 @@ flowchart LR
     ARD -->|Start show, add entries,\nend show| TF["tubafrenzy\nFlowsheet API\n(wxyc.info)"]
 ```
 
+### Planned Architecture
+
+A management server will sit between AzuraCast and the Arduino, subscribing to AzuraCast's Centrifugo real-time feed and relaying Now Playing updates over a single WebSocket that also carries management commands and heartbeat telemetry. An Ethernet shield provides the stable persistent connection required for WebSocket; WiFi remains as a fallback with direct AzuraCast polling.
+
+```mermaid
+flowchart LR
+    MB["Mixing Board\nAUX Relay"] -->|D2 pin| ARD
+
+    subgraph Ethernet["Ethernet (primary)"]
+        direction LR
+        AZ["AzuraCast\nCentrifugo"] -->|Real-time\ntrack updates| MGT["Management\nServer"]
+        MGT <-->|WebSocket:\nnow_playing,\ncommands,\nheartbeats,\nerror reports| ARD["Arduino\nGiga R1 WiFi +\nEthernet Shield"]
+    end
+
+    ARD -->|Start show,\nadd entries,\nend show| TF["tubafrenzy\nFlowsheet API"]
+
+    subgraph WiFi["WiFi (fallback)"]
+        direction LR
+        ARD -.->|Direct polling\n(20s interval)| AZ2["AzuraCast\nJSON API"]
+        ARD -.->|HTTP heartbeat +\ncommand poll| MGT2["Management\nServer"]
+    end
+```
+
+See [docs/networking-spec.md](docs/networking-spec.md) for the comprehensive networking specification (all protocols, both backends, credentials, shared types, and implementation phases). The [original roadmap](docs/remote-access-roadmap.md) is preserved for git history.
+
 ## State Machine
 
 ```mermaid
@@ -28,14 +53,14 @@ stateDiagram-v2
     ENDING_SHOW --> IDLE
 
     state AUTO_DJ_ACTIVE {
-        [*] --> Polling
-        Polling : Polls AzuraCast every 20s,\nadds flowsheet entries
+        [*] --> TrackDetection
+        TrackDetection : Receives push updates (Ethernet)\nor polls AzuraCast (WiFi fallback),\nadds flowsheet entries
     }
 ```
 
 - **IDLE:** Relay open (DJ is live). Waiting for auto DJ activation.
 - **STARTING_SHOW:** Relay closed. Creating a new show on tubafrenzy.
-- **AUTO_DJ_ACTIVE:** Polling AzuraCast, writing flowsheet entries. Server handles hourly breakpoints via `autoBreakpoint=true`.
+- **AUTO_DJ_ACTIVE:** Receiving push updates (Ethernet) or polling AzuraCast (WiFi fallback), writing flowsheet entries. Server handles hourly breakpoints via `autoBreakpoint=true`.
 - **ENDING_SHOW:** Relay opened. Signing off the show on tubafrenzy.
 
 ## Hardware
@@ -127,6 +152,15 @@ cd build && ctest --output-on-failure
 ```
 
 Tests run automatically on push and PR via GitHub Actions (`.github/workflows/test.yml`).
+
+## Documentation
+
+| Document | Scope |
+|----------|-------|
+| [docs/networking-spec.md](docs/networking-spec.md) | All network traffic, both flowsheet backends, credentials, management protocol, `wxyc-shared` types, implementation phases |
+| [docs/remote-administration.md](docs/remote-administration.md) | Parameter inventory: every configurable value and why it might change |
+| [docs/remote-access-roadmap.md](docs/remote-access-roadmap.md) | Original phased plan (superseded by networking-spec.md) |
+| [docs/wiring.md](docs/wiring.md) | Hardware wiring: relay, LED, pin assignments |
 
 ## Known Limitations
 
