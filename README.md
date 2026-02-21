@@ -10,9 +10,9 @@ When auto DJ is playing and no DJ is logged into the flowsheet, those tracks are
 
 ```mermaid
 flowchart LR
-    MB["Mixing Board\nAUX Relay\n(dry contact)"] -->|D2 pin| ARD["Arduino Giga R1 WiFi\nDetects auto DJ active\nvia relay on D2"]
-    ARD <-->|Now Playing API| AZ["AzuraCast\nremote.wxyc.org"]
-    ARD -->|Start show, add entries,\nend show| TF["tubafrenzy\nFlowsheet API\n(wxyc.info)"]
+    MB["Mixing Board<br>AUX Relay<br>(dry contact)"] -->|D2 pin| ARD["Arduino Giga R1 WiFi<br>Detects auto DJ active<br>via relay on D2"]
+    ARD <-->|Now Playing API| AZ["AzuraCast<br>remote.wxyc.org"]
+    ARD -->|Start show, add entries,<br>end show| TF["tubafrenzy<br>Flowsheet API<br>(wxyc.info)"]
 ```
 
 ### Planned Architecture
@@ -21,20 +21,20 @@ A management server will sit between AzuraCast and the Arduino, subscribing to A
 
 ```mermaid
 flowchart LR
-    MB["Mixing Board\nAUX Relay"] -->|D2 pin| ARD
+    MB["Mixing Board<br>AUX Relay"] -->|D2 pin| ARD
 
     subgraph Ethernet["Ethernet (primary)"]
         direction LR
-        AZ["AzuraCast\nCentrifugo"] -->|Real-time\ntrack updates| MGT["Management\nServer"]
-        MGT <-->|WebSocket:\nnow_playing,\ncommands,\nheartbeats,\nerror reports| ARD["Arduino\nGiga R1 WiFi +\nEthernet Shield"]
+        AZ["AzuraCast<br>Centrifugo"] -->|Real-time<br>track updates| MGT["Management<br>Server"]
+        MGT <-->|WebSocket:<br>now_playing,<br>commands,<br>heartbeats,<br>error reports| ARD["Arduino<br>Giga R1 WiFi +<br>Ethernet Shield"]
     end
 
-    ARD -->|Start show,\nadd entries,\nend show| TF["tubafrenzy\nFlowsheet API"]
+    ARD -->|Start show,<br>add entries,<br>end show| TF["tubafrenzy<br>Flowsheet API"]
 
     subgraph WiFi["WiFi (fallback)"]
         direction LR
-        ARD -.->|Direct polling\n(20s interval)| AZ2["AzuraCast\nJSON API"]
-        ARD -.->|HTTP heartbeat +\ncommand poll| MGT2["Management\nServer"]
+        ARD -.->|Direct polling<br>every 20s| AZ2["AzuraCast<br>JSON API"]
+        ARD -.->|HTTP heartbeat +<br>command poll| MGT2["Management<br>Server"]
     end
 ```
 
@@ -47,14 +47,14 @@ stateDiagram-v2
     [*] --> BOOTING
     BOOTING --> CONNECTING_WIFI
     CONNECTING_WIFI --> IDLE
-    IDLE --> STARTING_SHOW : Relay closed\n(auto DJ active)
+    IDLE --> STARTING_SHOW : Relay closed<br>(auto DJ active)
     STARTING_SHOW --> AUTO_DJ_ACTIVE
-    AUTO_DJ_ACTIVE --> ENDING_SHOW : Relay opened\n(DJ is live)
+    AUTO_DJ_ACTIVE --> ENDING_SHOW : Relay opened<br>(DJ is live)
     ENDING_SHOW --> IDLE
 
     state AUTO_DJ_ACTIVE {
         [*] --> TrackDetection
-        TrackDetection : Receives push updates (Ethernet)\nor polls AzuraCast (WiFi fallback),\nadds flowsheet entries
+        TrackDetection : Receives push updates (Ethernet)<br>or polls AzuraCast (WiFi fallback),<br>adds flowsheet entries
     }
 ```
 
