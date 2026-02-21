@@ -35,13 +35,13 @@ These are the most operationally urgent candidates for remote updates. Both chan
 
 ### Timezone
 
-The device currently hardcodes Eastern Standard Time year-round. This is the single most visible bug in normal operation: during Eastern Daylight Time (mid-March through early November), every show start time and hourly breakpoint is off by one hour.
+The device defines `UTC_OFFSET_SECONDS` as `-18000` (UTC-5, EST) in `config.h` but never references it -- flowsheet timestamps (`startingHour`, `workingHour`) are UTC epoch milliseconds from NTP, which are timezone-agnostic and correct year-round. Breakpoint insertion (both tubafrenzy's `autoBreakpoint` and Backend-Service's explicit breakpoints) depends on hour-boundary changes, which align between UTC and Eastern time because the offset is a whole number of hours.
 
 | Parameter | Current value | Issue |
 |-----------|--------------|-------|
-| `UTC_OFFSET_SECONDS` | `-18000` (UTC-5, EST) | No DST adjustment; wrong 8 months of the year |
+| `UTC_OFFSET_SECONDS` | `-18000` (UTC-5, EST) | Defined but unused; no DST awareness |
 
-An automatic DST rule (second Sunday in March, first Sunday in November) would eliminate two manual interventions per year and fix the timestamp drift without any remote action needed.
+Where DST awareness *would* help is human-readable output: serial debug logs, heartbeat telemetry timestamps, and admin UI display. An automatic DST rule (second Sunday in March, first Sunday in November) would let the firmware format local times correctly without manual intervention or remote configuration.
 
 ### Polling and Retry Behavior
 

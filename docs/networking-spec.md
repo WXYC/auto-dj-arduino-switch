@@ -519,7 +519,7 @@ sequenceDiagram
 | **Protocol** | UDP |
 | **Server** | `pool.ntp.org` |
 | **Port** | 123 |
-| **Purpose** | Epoch time for flowsheet timestamps (`startingHour`, `workingHour`) |
+| **Purpose** | UTC epoch time for flowsheet timestamps (`startingHour`, `workingHour`), heartbeat telemetry, and human-readable local time display (via `localEpoch()`) |
 
 **WiFi transport**: `WiFi.getTime()` handles NTP internally within the WiFi module firmware. No explicit UDP required.
 
@@ -1879,18 +1879,24 @@ Protocol details, message formats, and credential specs live in Sections 3-5 and
 
 ### 7.1 Phase 0: Automatic DST
 
-**No remote infrastructure required.** Firmware-only fix eliminating two manual interventions per year.
+**No remote infrastructure required.** Firmware-only change for human-readable local times.
 
-Add `isDST(epochSeconds)` implementing the US Eastern time rule:
+**What this does NOT affect**: Flowsheet timestamps (`startingHour`, `workingHour`) are UTC epoch milliseconds and are correct year-round without any timezone logic. Breakpoint insertion works correctly because UTC hour boundaries align with Eastern hour boundaries (the offset is always a whole number of hours). `currentHourMs()` is unaffected.
+
+**What this does affect**: Serial debug logs, heartbeat telemetry, and any future admin UI display that wants to show human-readable local times (e.g., "show started at 3:00 PM" rather than a raw epoch value).
+
+Add `isDST(epochSeconds)` implementing the US Eastern time rule (Energy Policy Act of 2005, unchanged since 2007):
 
 - DST begins: second Sunday of March at 2:00 AM EST
 - DST ends: first Sunday of November at 2:00 AM EDT
 
-Pure function of epoch seconds -- testable on desktop with GoogleTest.
+Pure function of epoch seconds -- no network dependency, no calendar service, testable on desktop with GoogleTest.
+
+Add `localEpoch(utcEpochSeconds)` that applies `UTC_OFFSET_SECONDS + (isDST ? 3600 : 0)` for formatting local times. `currentHourMs()` continues to operate on raw UTC.
 
 | File | Change |
 |------|--------|
-| `utils.h` / `utils.cpp` | Add `isDST()`, update `currentHourMs()` offset logic |
+| `utils.h` / `utils.cpp` | Add `isDST()` and `localEpoch()`; `currentHourMs()` unchanged |
 | `config.h` | Optionally add `DST_ENABLED` flag (default `true`) |
 | `test/test_dst.cpp` | Parameterized boundary tests |
 
@@ -1909,7 +1915,7 @@ Use `KVStore` (TDBStore on QSPI flash) for key-value persistence with wear level
 | `wifi_pass` | `char[128]` | Remotely updatable WiFi password |
 | `api_key` | `char[128]` | Remotely updatable tubafrenzy API key |
 | `poll_interval_ms` | `uint32_t` | Remotely tunable polling interval |
-| `utc_offset` | `int32_t` | Manual timezone override |
+| `utc_offset` | `int32_t` | Manual timezone override for human-readable display |
 | `flowsheet_backend` | `uint8_t` | `0` = tubafrenzy, `1` = Backend-Service |
 | `backend_service_token` | `char[256]` | Better Auth PAT for Backend-Service |
 | `backend_service_dj_id` | `int32_t` | DJ record ID in Backend-Service |
@@ -2241,7 +2247,7 @@ flowchart LR
 
 | Phase | Outcome | Depends on |
 |-------|---------|-----------|
-| **0: Automatic DST** | Correct timestamps year-round, no manual intervention | Nothing |
+| **0: Automatic DST** | Human-readable local times in logs and telemetry (flowsheet timestamps are already correct as UTC epoch) | Nothing |
 | **1: Persistent Storage** | Survive power cycles; runtime config struct replaces `#define` soup | Phase 0 (should land first, but no hard dependency) |
 | **2: Ethernet Shield** | Stable primary transport; WiFi becomes fallback; network abstraction layer | Phase 0 (should land first, but no hard dependency) |
 | **wxyc-shared schemas** | Auto DJ types in `api.yaml`; `@wxyc/shared/auto-dj` entry point | Phase 2 (needs network abstraction for dual-backend) |

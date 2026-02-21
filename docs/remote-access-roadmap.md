@@ -52,26 +52,28 @@ This means:
 
 ## Phase 0: Automatic DST
 
-**No remote infrastructure required.** This is a firmware-only fix that eliminates two manual interventions per year and corrects the 8-month timestamp drift documented in [remote-administration.md](remote-administration.md#timezone).
+**No remote infrastructure required.** Firmware-only change for human-readable local times in serial debug logs, heartbeat telemetry, and admin UI display.
+
+**Why this is low priority**: Flowsheet timestamps (`startingHour`, `workingHour`) are UTC epoch milliseconds and are correct year-round without any timezone logic. Breakpoint insertion works correctly because UTC hour boundaries align with Eastern hour boundaries (the offset is always a whole number of hours). `currentHourMs()` does not need modification.
 
 ### What Changes
 
-Add a `isDST(epochSeconds)` function implementing the US Eastern time rule:
+Add a `isDST(epochSeconds)` function implementing the US Eastern time rule (Energy Policy Act of 2005, unchanged since 2007):
 
 - DST begins: second Sunday of March at 2:00 AM EST (clocks spring forward to 3:00 AM EDT)
 - DST ends: first Sunday of November at 2:00 AM EDT (clocks fall back to 1:00 AM EST)
 
-The function returns `true` during EDT, `false` during EST. `currentHourMs()` applies `UTC_OFFSET_SECONDS + (isDST ? 3600 : 0)`.
+The function returns `true` during EDT, `false` during EST. A companion `localEpoch(utcEpochSeconds)` function applies `UTC_OFFSET_SECONDS + (isDST ? 3600 : 0)` for formatting local times. `currentHourMs()` continues to operate on raw UTC epoch seconds.
 
 ### Testability
 
-`isDST()` is a pure function of epoch seconds -- no hardware dependency. It belongs in `utils.h`/`utils.cpp` alongside `currentHourMs()`, with desktop GoogleTest coverage for boundary cases (the exact transition seconds in March and November, hour before/after, New Year's, summer, winter).
+`isDST()` is a pure function of epoch seconds -- no hardware dependency, no calendar service. It belongs in `utils.h`/`utils.cpp` alongside `currentHourMs()`, with desktop GoogleTest coverage for boundary cases (the exact transition seconds in March and November, hour before/after, New Year's, summer, winter).
 
 ### Scope
 
 | File | Change |
 |------|--------|
-| `utils.h` / `utils.cpp` | Add `isDST()`, update `currentHourMs()` signature or offset logic |
+| `utils.h` / `utils.cpp` | Add `isDST()` and `localEpoch()`; `currentHourMs()` unchanged |
 | `config.h` | Optionally add `DST_ENABLED` flag (default `true`) for deployments outside US Eastern |
 | `test/test_dst.cpp` | New test file with parameterized boundary tests |
 
@@ -102,7 +104,7 @@ The STM32H747 has **2 MB of internal flash** and the Giga R1 board adds **16 MB 
 | `wifi_pass` | `char[128]` | Remotely updatable WiFi password (fallback transport) |
 | `api_key` | `char[128]` | Remotely updatable API key |
 | `poll_interval_ms` | `uint32_t` | Remotely tunable polling interval |
-| `utc_offset` | `int32_t` | Manual timezone override (if DST auto-detection is disabled) |
+| `utc_offset` | `int32_t` | Manual timezone override for human-readable display (if DST auto-detection is disabled) |
 
 At boot, the firmware reads from KVStore. If a key is missing (first boot), it falls back to the compile-time `#define` from `config.h` / `secrets.h` and writes the default to KVStore. Subsequent boots use the stored value. Remote config updates write new values to KVStore; the firmware picks them up on the next boot or immediately if the parameter is hot-reloadable.
 
@@ -823,7 +825,7 @@ flowchart LR
 
 | Phase | Outcome | Depends on |
 |-------|---------|-----------|
-| **0: Automatic DST** | Correct timestamps year-round, no manual intervention | Nothing |
+| **0: Automatic DST** | Human-readable local times in logs and telemetry (flowsheet timestamps are already correct as UTC epoch) | Nothing |
 | **1: Persistent Storage** | Survive power cycles; runtime config struct replaces `#define` soup | Phase 0 (should land first, but no hard dependency) |
 | **2: Ethernet Shield** | Stable primary transport; WiFi becomes fallback; network abstraction layer | Phase 0 (should land first, but no hard dependency) |
 | **3: WebSocket Management + AzuraCast Relay** | Real-time remote visibility and control; instant command delivery over Ethernet; push-based Now Playing updates via AzuraCast Centrifugo relay; graceful degradation to HTTP polling over WiFi | Phases 1 + 2 |
