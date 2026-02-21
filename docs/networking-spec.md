@@ -23,7 +23,7 @@ This document covers:
 - Shared type contracts via `wxyc-shared` (`api.yaml`)
 - Authentication and credential management for all connections
 - The management server protocol (WebSocket + HTTP fallback)
-- AzuraCast Centrifugo relay for real-time now-playing data
+- AzuraCast real-time now-playing via direct WebSocket (Centrifugo)
 - Implementation phases (a restructured and expanded version of the original roadmap)
 
 Related documents:
@@ -63,8 +63,7 @@ flowchart TD
     end
 
     subgraph External["External Services"]
-        AZ["AzuraCast<br>remote.wxyc.org<br>(Now Playing API)"]
-        CF["Centrifugo<br>(embedded in AzuraCast)<br>WebSocket push"]
+        AZ["AzuraCast<br>remote.wxyc.org<br>(Now Playing API +<br>Centrifugo WebSocket)"]
         TF["tubafrenzy<br>www.wxyc.info<br>(Legacy Flowsheet API)"]
         BS["Backend-Service<br>api.wxyc.org<br>(New Flowsheet API)"]
         MS["Management Server<br>(WebSocket + REST)"]
@@ -75,18 +74,17 @@ flowchart TD
         UI["Admin UI<br>(web dashboard)"]
     end
 
-    ARD -- "HTTPS GET<br>now-playing poll" --> AZ
-    ARD -. "WSS<br>now-playing push<br>(via management server)" .-> CF
+    ARD -- "HTTPS GET<br>now-playing poll<br>(WiFi fallback)" --> AZ
+    ARD -. "WSS<br>now-playing push<br>(Ethernet, direct)" .-> AZ
     ARD -- "HTTPS POST<br>form-encoded" --> TF
     ARD -. "HTTPS POST<br>JSON + Bearer token" .-> BS
-    ARD -- "WSS / HTTPS<br>heartbeat + commands" --> MS
+    ARD -. "WSS / HTTPS<br>heartbeat + commands" .-> MS
     ARD -- "UDP :123<br>time sync" --> NTP
 
-    UI -- "HTTPS<br>status + commands" --> MS
-    MS -. "WSS subscribe<br>station:main" .-> CF
+    UI -. "HTTPS<br>status + commands" .-> MS
 
     style BS stroke-dasharray: 5 5
-    style CF stroke-dasharray: 5 5
+    style MS stroke-dasharray: 5 5
 ```
 
 Dashed lines indicate planned connections not yet implemented. Solid lines are in production today.
@@ -160,7 +158,8 @@ The management server provides:
 - A WebSocket endpoint for real-time bidirectional communication (Ethernet mode)
 - HTTP fallback endpoints for heartbeat and command polling (WiFi mode)
 - An admin API for viewing device status and issuing commands
-- A Centrifugo relay that subscribes to AzuraCast's now-playing channel and pushes updates to the Arduino
+
+Note: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The management server handles only device management (heartbeats, commands, status).
 
 **Server choice**: Backend-Service (Express/Node.js) is a natural fit -- it already has WebSocket infrastructure via the `ws` package, uses Better Auth for admin authentication, and is the actively maintained backend. A standalone lightweight service (Hono or Fastify on Railway) is an alternative that keeps the management concern decoupled. See Appendix A for the full comparison.
 
@@ -179,11 +178,11 @@ The management server provides:
 | 5 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer token | JSON | Both | Planned |
 | 6 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet` | Bearer token | JSON | Both | Planned |
 | 7 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer token | JSON | Both | Planned |
-| 8 | Arduino -> NTP | UDP | `pool.ntp.org:123` | None | NTP packet | Ethernet | Planned |
-| 9 | Arduino <-> Mgmt Server | WSS | `/api/auto-dj/ws` | `X-Auto-DJ-Key` | JSON frames | Ethernet | Planned |
-| 10 | Arduino -> Mgmt Server | HTTPS POST | `/api/auto-dj/heartbeat` | `X-Auto-DJ-Key` | JSON | WiFi (fallback) | Planned |
-| 11 | Arduino -> Mgmt Server | HTTPS GET | `/api/auto-dj/commands` | `X-Auto-DJ-Key` | JSON response | WiFi (fallback) | Planned |
-| 12 | Mgmt Server <-> Centrifugo | WSS | `station:main` channel | Centrifugo API key | JSON frames | Server-side | Planned |
+| 8 | Arduino <-> AzuraCast | WSS | `/api/live/nowplaying/websocket` | None (public) | JSON frames | Ethernet | Planned |
+| 9 | Arduino -> NTP | UDP | `pool.ntp.org:123` | None | NTP packet | Ethernet | Planned |
+| 10 | Arduino <-> Mgmt Server | WSS | `/api/auto-dj/ws` | `X-Auto-DJ-Key` | JSON frames | Ethernet | Planned |
+| 11 | Arduino -> Mgmt Server | HTTPS POST | `/api/auto-dj/heartbeat` | `X-Auto-DJ-Key` | JSON | WiFi (fallback) | Planned |
+| 12 | Arduino -> Mgmt Server | HTTPS GET | `/api/auto-dj/commands` | `X-Auto-DJ-Key` | JSON response | WiFi (fallback) | Planned |
 | 13 | Admin UI -> Mgmt Server | HTTPS POST | `/api/auto-dj/commands` | Better Auth session | JSON | N/A | Planned |
 | 14 | Admin UI -> Mgmt Server | HTTPS GET | `/api/auto-dj/status` | Better Auth session | JSON response | N/A | Planned |
 | 15 | Arduino -> NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Live** |
@@ -438,29 +437,30 @@ sequenceDiagram
     participant Arduino
     participant Server as Management Server
     participant Admin as Admin UI
-    participant AZ as AzuraCast<br>Centrifugo
+    participant AZ as AzuraCast
 
     Note over Arduino: Boot complete,<br/>Ethernet link up
 
     Arduino->>Server: WebSocket upgrade<br/>(wss://server/api/auto-dj/ws)<br/>X-Auto-DJ-Key header
     Server-->>Arduino: 101 Switching Protocols
 
-    Server->>AZ: Subscribe to<br/>station:main channel
-    AZ-->>Server: Subscription confirmed
+    Arduino->>AZ: WebSocket upgrade<br/>(wss://remote.wxyc.org/api/live/nowplaying/websocket)
+    AZ-->>Arduino: 101 Switching Protocols
+    Arduino->>AZ: {"subs": {"station:shortcode": {"recover": true}}}
+    AZ-->>Arduino: Initial now_playing data (cached)
 
     loop Every 30s
         Arduino->>Server: {"type": "heartbeat", ...}
     end
 
-    AZ->>Server: Now playing update
-    Server->>Arduino: {"type": "now_playing", ...}
+    AZ->>Arduino: Now playing update (track change)
 
     Admin->>Server: POST /api/auto-dj/commands<br/>{"action": "pause"}
     Server->>Arduino: {"type": "command", "id": "x1", "action": "pause"}
     Arduino->>Server: {"type": "ack", "id": "x1", "status": "ok"}
 
     Note over Arduino: Ethernet cable unplugged
-    Note over Arduino: WebSocket drops
+    Note over Arduino: Both WebSockets drop
 
     Arduino->>Arduino: Failover to WiFi
 
@@ -589,7 +589,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `album` | `string` | Album title |
 | `is_live` | `boolean` | Whether a live DJ is streaming |
 
-This is a flat structure designed for efficient ArduinoJson parsing. The management server subscribes to AzuraCast's Centrifugo `station:main` channel and relays the now-playing data in this simplified format. See Section 3.9 for the Centrifugo relay architecture.
+This is a flat structure designed for efficient ArduinoJson parsing. If the relay architecture is used (Appendix B), the management server extracts these fields from AzuraCast's Centrifugo feed and sends this simplified format. If the Arduino subscribes directly to Centrifugo (Section 3.9, recommended), this message type is not used -- the Arduino parses the Centrifugo payload itself.
 
 **Error Report** (Arduino -> Server):
 
@@ -690,13 +690,61 @@ The Arduino processes each command and sends acknowledgments as separate POST re
 
 All Arduino-facing endpoints authenticate via the `X-Auto-DJ-Key` header. All admin-facing endpoints authenticate via Better Auth session cookies or JWT.
 
-### 3.9 AzuraCast Centrifugo Relay
+### 3.9 AzuraCast Centrifugo: Direct WebSocket
 
-**Status**: Planned (Phase 3)
+**Status**: Planned (Phase 2/3)
 
-AzuraCast embeds a Centrifugo real-time messaging server. The management server subscribes to the `station:main` channel and relays now-playing updates to the Arduino, reducing the need for the Arduino to poll the AzuraCast HTTP API.
+AzuraCast embeds a [Centrifugo](https://centrifugal.dev/) real-time messaging server and exposes a public WebSocket endpoint for now-playing updates. The Arduino can subscribe directly -- no relay server needed.
 
-**Architecture**:
+#### 3.9.1 Protocol
+
+| Field | Value |
+|-------|-------|
+| **Endpoint** | `wss://remote.wxyc.org/api/live/nowplaying/websocket` |
+| **Auth** | None (public, no token required) |
+| **Transport** | Ethernet only (persistent WebSocket) |
+| **Fallback** | HTTP polling (Section 3.2) over WiFi or when WebSocket is unavailable |
+
+**Connection sequence**:
+
+1. Open WebSocket to `wss://remote.wxyc.org/api/live/nowplaying/websocket`
+2. Send subscription message:
+   ```json
+   {"subs": {"station:<shortcode>": {"recover": true}}}
+   ```
+   The `recover: true` flag enables Centrifugo's connection recovery (missed messages are replayed on reconnect). The station shortcode must be verified -- see Open Question 9.
+3. Receive initial cached data immediately on connect (no waiting for next track change):
+   ```json
+   {
+       "connect": {
+           "subs": {
+               "station:<shortcode>": {
+                   "publications": [{"data": {"np": { ... }}}]
+               }
+           }
+       }
+   }
+   ```
+4. Receive subsequent updates as they occur:
+   ```json
+   {"channel": "station:<shortcode>", "pub": {"data": {"np": { ... }}}}
+   ```
+
+**Relevant fields in `np`**:
+
+| JSON Path | Type | Arduino Usage |
+|-----------|------|--------------|
+| `np.now_playing.sh_id` | `int` | Track change detection (same as HTTP polling) |
+| `np.now_playing.song.artist` | `string` | Flowsheet entry |
+| `np.now_playing.song.title` | `string` | Flowsheet entry |
+| `np.now_playing.song.album` | `string` | Flowsheet entry |
+| `np.live.is_live` | `bool` | Live DJ detection |
+
+These are the same fields extracted by the HTTP polling endpoint (Section 3.2). The ArduinoJson filter document is identical.
+
+**Sources**: [AzuraCast Now Playing Data APIs](https://www.azuracast.com/docs/developers/now-playing-data/), [AzuraCast HPNP SSE example](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)
+
+#### 3.9.2 Dual-Mode Architecture
 
 ```mermaid
 stateDiagram-v2
@@ -704,29 +752,57 @@ stateDiagram-v2
 
     state PollMode {
         [*] --> Polling
-        Polling: Arduino polls AzuraCast<br>GET /api/nowplaying_static/main.json<br>every POLL_INTERVAL_MS
+        Polling: Arduino polls AzuraCast HTTP API<br>GET /api/nowplaying_static/main.json<br>every POLL_INTERVAL_MS (20s)
     }
 
     state PushMode {
         [*] --> Listening
-        Listening: Management server pushes<br>now_playing messages over WebSocket
+        Listening: Arduino receives now_playing<br>via direct Centrifugo WebSocket<br>near-real-time updates
         Listening --> SafetyPoll: 60s since last push
-        SafetyPoll: Arduino polls AzuraCast<br>as a safety net
-        SafetyPoll --> Listening: Push received
+        SafetyPoll: Arduino polls AzuraCast HTTP API<br>as a safety net
+        SafetyPoll --> Listening: WebSocket message received
     }
 
-    PollMode --> PushMode: WebSocket connected +<br>Centrifugo subscription active
-    PushMode --> PollMode: WebSocket disconnected
+    PollMode --> PushMode: Ethernet up +<br>WebSocket connected
+    PushMode --> PollMode: WebSocket disconnected /<br>Ethernet lost
 ```
 
-**Dual-mode behavior**:
+- **Ethernet (push mode)**: The Arduino opens a WebSocket directly to AzuraCast's Centrifugo endpoint. Track updates arrive in near-real-time. A 60-second safety-net poll to the HTTP API catches any missed messages (Centrifugo is best-effort; the HTTP endpoint is Nginx-cached and authoritative).
+- **WiFi (poll mode)**: The Arduino polls the AzuraCast HTTP API on the existing `POLL_INTERVAL_MS` timer. No persistent connections (to avoid the Giga R1 crash bug). No change from current behavior.
 
-- **WiFi (poll mode)**: The Arduino polls the AzuraCast HTTP API directly on its existing `POLL_INTERVAL_MS` timer. No change from current behavior.
-- **Ethernet (push mode)**: The management server subscribes to Centrifugo's `station:main` channel and relays `now_playing` messages over the WebSocket (Section 3.6.2). The Arduino receives track updates in near-real-time. A 60-second safety-net poll to the AzuraCast HTTP API catches any missed Centrifugo messages.
+#### 3.9.3 Why Direct (Not Relayed)
 
-**Why relay through the management server?** The Arduino cannot subscribe to Centrifugo directly -- Centrifugo uses a JavaScript client (`centrifuge-js`) designed for browsers, and the connection negotiation (JWT token exchange, protocol framing) is too complex for the constrained Arduino environment. The management server acts as a protocol translator.
+The original design (see Appendix B) assumed the Arduino could not subscribe to Centrifugo directly, requiring the management server to act as a relay. This assumption was wrong: AzuraCast's Centrifugo endpoint uses standard WebSocket with a simple JSON subscription message and no authentication. The Arduino can connect directly using the `ArduinoWebsockets` library.
 
-See Appendix B for Centrifugo integration details.
+Direct subscription is simpler:
+
+| | Direct (recommended) | Relay via management server |
+|--|---------------------|---------------------------|
+| **Dependencies** | Arduino + AzuraCast only | Arduino + management server + AzuraCast |
+| **Latency** | Single hop | Two hops (Centrifugo -> server -> Arduino) |
+| **Failure modes** | AzuraCast down | AzuraCast down OR management server down |
+| **Phase dependency** | Phase 2 (Ethernet) | Phase 3 (management server) |
+| **Arduino complexity** | WebSocket client + JSON parsing | Same (receives JSON either way) |
+
+The relay architecture remains a fallback option if direct connection proves problematic (e.g., ArduinoJson memory limits on the full Centrifugo payload, or reconnection complexity). The management server can always be interposed later without changing the Arduino's internal data flow -- the `AzuraCastClient` consumes the same fields regardless of source.
+
+#### 3.9.4 ArduinoJson Memory Considerations
+
+The Centrifugo now-playing payload is larger than the static HTTP endpoint response (~10 KB) because it includes the full Centrifugo envelope. An ArduinoJson filter document keeps memory usage bounded:
+
+```cpp
+JsonDocument filter;
+filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["now_playing"]["sh_id"] = true;
+filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["now_playing"]["song"]["artist"] = true;
+filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["now_playing"]["song"]["title"] = true;
+filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["now_playing"]["song"]["album"] = true;
+filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["live"]["is_live"] = true;
+// Same filter pattern for "pub" messages
+```
+
+If the Centrifugo payload exceeds ArduinoJson's practical parsing limits on the Giga R1 (~16 KB with filter), the relay approach (Appendix B) becomes necessary -- the management server would extract the relevant fields and send a flat ~200-byte `AutoDJNowPlaying` message.
+
+See Appendix B for the relay alternative and detailed Centrifugo integration notes.
 
 ---
 
@@ -1580,16 +1656,28 @@ The management server's WebSocket handling needs dedicated tests that exercise t
 | **Connection lifecycle** | WebSocket upgrade with valid `X-Auto-DJ-Key` -> accepted; invalid key -> 401; connection drop -> device status changes to `connected: false`; reconnect -> status restores |
 | **Stale heartbeat detection** | No heartbeat for >60s -> device marked offline; heartbeat resumes -> device marked online |
 
-**Centrifugo relay transform** (Jest or Vitest):
+**AzuraCast Centrifugo WebSocket parsing** (Arduino-side, GoogleTest):
 
-The management server subscribes to AzuraCast's Centrifugo `station:main` channel and transforms the large nested now-playing payload into the flat `AutoDJNowPlaying` schema (Section 3.6.2). This transform needs its own tests:
+The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The `AzuraCastClient` must parse both the initial `connect` response and subsequent `pub` messages. These use `FakeWebSocket` with pre-loaded Centrifugo JSON:
+
+| Scenario | Test Focus |
+|----------|-----------|
+| **Initial connect** | Parse `connect.subs.station:*.publications[0].data.np` -> extract `sh_id`, `artist`, `title`, `album`, `is_live` |
+| **Subsequent update** | Parse `pub.data.np` -> same field extraction |
+| **Track change detection** | Two messages with different `sh_id` values -> both trigger new track; same `sh_id` -> no trigger |
+| **Missing fields** | `null` song fields -> graceful handling (empty strings or skip) |
+| **Live DJ flag** | `live.is_live: true` -> `isLiveDJ()` true |
+| **Oversized payload** | Centrifugo response exceeding ArduinoJson memory budget -> graceful failure, fall back to HTTP poll |
+
+**Centrifugo relay transform** (management server, Jest or Vitest -- only if relay architecture is used, see Appendix B):
+
+If the direct WebSocket proves impractical and the management server relays now-playing data, the transform from the full Centrifugo payload to the flat `AutoDJNowPlaying` schema (Section 3.6.2) needs its own tests:
 
 | Scenario | Test Focus |
 |----------|-----------|
 | **Normal transform** | Full AzuraCast now-playing JSON (fixture) -> extract `sh_id`, `artist`, `title`, `album`, `is_live` -> output matches `AutoDJNowPlaying` schema |
-| **Missing fields** | AzuraCast JSON with `null` song fields -> graceful handling (empty strings or skip) |
-| **Live DJ flag** | `live.is_live: true` -> `is_live: true` in output |
-| **Relay to Arduino** | Transformed message sent on WebSocket -> Arduino's `FakeWebSocket` receives valid `AutoDJNowPlaying` (this is an integration test bridging server and Arduino fixtures) |
+| **Missing fields** | AzuraCast JSON with `null` song fields -> graceful handling |
+| **Relay to Arduino** | Transformed message sent on WebSocket -> Arduino's `FakeWebSocket` receives valid `AutoDJNowPlaying` |
 
 #### Shared test fixtures: wxyc-shared as the contract
 
@@ -1785,7 +1873,7 @@ classDiagram
 
 **Message types**: See Section 3.6.2 and Section 5.2 (OpenAPI schemas).
 
-**AzuraCast Centrifugo relay**: See Section 3.9 and Appendix B. Dual-mode: push over WebSocket (Ethernet), poll HTTP (WiFi), 60s safety net.
+**AzuraCast now-playing**: The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket over Ethernet and falls back to HTTP polling over WiFi. See Section 3.9. This is independent of the management server -- the now-playing feed and the management channel are separate WebSocket connections.
 
 **`loop()` integration**:
 
@@ -1869,7 +1957,7 @@ gantt
     HTTP short-poll fallback               :p3c, after p3b, 7d
     Admin UI / dashboard                   :p3d, after p3a, 14d
     Pause/resume + force end show          :p3e, after p3c, 7d
-    Centrifugo relay integration           :p3f, after p3a, 7d
+    AzuraCast direct WebSocket             :p2f, after p2e, 7d
 
     section Phase 4
     Credential rotation protocol           :p4a, after p3e, 14d
@@ -1931,11 +2019,11 @@ flowchart LR
 
 ### New questions
 
-9. **Centrifugo channel name:** Verify that AzuraCast's Centrifugo uses `station:main` as the channel name for the primary station. This may vary by AzuraCast version or configuration.
+9. **Centrifugo channel name:** The channel format is `station:<shortcode>` where the shortcode is the station's URL-safe identifier in AzuraCast ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). For WXYC this is likely `station:main` or `station:wxyc` -- verify by inspecting the AzuraCast admin panel or the station's shortcode in the API response at `/api/stations`. **Partially resolved**: format confirmed, exact shortcode needs verification.
 
-10. **Centrifugo authentication:** How does a server-side client authenticate to AzuraCast's Centrifugo? Is there an API key, or does it use the AzuraCast admin API to obtain a Centrifugo connection token?
+10. ~~**Centrifugo authentication:**~~ **Resolved.** The now-playing WebSocket endpoint (`/api/live/nowplaying/websocket`) is public -- no authentication token is required ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). The Arduino subscribes by sending `{"subs": {"station:<shortcode>": {}}}` after connecting. This eliminates the need for the management server as a relay for the now-playing feed. See Section 3.9.
 
-11. **Centrifugo reconnection:** Does `centrifuge-js` (or a server-side Centrifugo client library) handle automatic reconnection with backoff? The management server must not flood Centrifugo on network instability.
+11. **Centrifugo reconnection:** The Arduino must handle WebSocket reconnection itself (the `ArduinoWebsockets` library does not have built-in reconnection with backoff). Implement exponential backoff in the `AzuraCastClient` -- e.g., 1s, 2s, 4s, 8s, capped at 60s. During reconnection, fall back to HTTP polling. The `recover: true` subscription flag tells Centrifugo to replay missed messages on reconnect ([source](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)).
 
 12. **Backend-Service `show_id` tracking:** Does Backend-Service track the active show per DJ internally (so the Arduino doesn't need to pass `show_id` on every `POST /flowsheet` call), or does the Arduino need to include it? The current `api.yaml` schema for `FlowsheetCreateSongFreeform` does not include `show_id`, which suggests the server tracks it.
 
@@ -1964,18 +2052,39 @@ flowchart LR
 
 ## Appendix B: AzuraCast Centrifugo Integration Details
 
-AzuraCast embeds Centrifugo for real-time updates. The management server subscribes to the `station:main` channel (to be verified -- see Open Question 9) and relays now-playing data to the Arduino.
+AzuraCast embeds [Centrifugo](https://centrifugal.dev/) for real-time updates. It exposes two public endpoints for now-playing data ([source](https://www.azuracast.com/docs/developers/now-playing-data/)):
 
-**Key integration notes:**
+| Protocol | Endpoint | Direction |
+|----------|---------|-----------|
+| **WebSocket** | `wss://<host>/api/live/nowplaying/websocket` | Bidirectional (subscribe + receive) |
+| **SSE** | `https://<host>/api/live/nowplaying/sse?cf_connect=<JSON>` | Server -> client only |
 
-- **Channel name**: AzuraCast publishes now-playing updates to a channel named `station:<station_short_name>`. For WXYC's single-station setup, this is expected to be `station:main`.
+The Arduino uses the WebSocket endpoint (Section 3.9). SSE is not suitable for Arduino (no `EventSource` API).
 
-- **Connection token**: Centrifugo may require a JWT connection token. AzuraCast's admin API may provide a way to generate one, or the Centrifugo API key can be used for server-side subscriptions.
+### Protocol Details
 
-- **Reconnection**: The `centrifuge-js` library (usable in Node.js) handles automatic reconnection with exponential backoff. The management server should use this library's built-in reconnection rather than implementing its own.
+**Subscription format** ([source](https://www.azuracast.com/docs/developers/now-playing-data/)):
 
-- **Initial state on connect**: When the management server first subscribes, it should receive the current now-playing state (Centrifugo supports this via `recover` mode or by fetching the last published message). This ensures the Arduino has accurate data immediately after the management server starts.
+```json
+{"subs": {"station:<shortcode>": {"recover": true}}}
+```
 
-- **Flat message format**: The now-playing data from Centrifugo is a large nested JSON object (similar to the `/api/nowplaying_static/main.json` response). The management server extracts only the fields the Arduino needs (`sh_id`, `artist`, `title`, `album`, `is_live`) and sends the flat `AutoDJNowPlaying` message (Section 3.6.2). This keeps ArduinoJson parsing simple and memory usage low.
+The `recover: true` flag enables Centrifugo's [history recovery](https://centrifugal.dev/docs/server/history_and_recovery) -- on reconnect, the server replays messages missed during the disconnection window.
 
-- **Fallback**: If the Centrifugo connection fails, the Arduino falls back to polling the AzuraCast HTTP API directly (Section 3.2). The 60-second safety-net poll (Section 3.9) catches missed messages even when push is nominally active.
+**Initial data on connect**: Centrifugo sends cached publications immediately on subscription. The `connect` message includes the current now-playing state, so the Arduino has accurate data from the moment of connection -- no need to wait for the next track change or make a separate HTTP request ([source](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)).
+
+**Channel naming**: The channel format is `station:<shortcode>` where the shortcode is the station's URL-safe identifier in AzuraCast. For WXYC, this needs to be verified by inspecting the AzuraCast admin panel or querying `/api/stations` (see Open Question 9).
+
+**Authentication**: The now-playing WebSocket endpoint is public. No JWT token, API key, or other authentication is required.
+
+**Centrifugo version note**: AzuraCast updated to Centrifugo v5 in early 2024, which changed the SSE/WebSocket message format. The current format sends initial cached publications in the `connect` response. Older AzuraCast installations may use a different format. The examples in this document and in Section 3.9 reflect the current (post-2024) format.
+
+### Relay Alternative
+
+If the direct WebSocket connection (Section 3.9) proves impractical -- for example, if the Centrifugo payload exceeds ArduinoJson's memory budget, or if reconnection logic is too complex for the Arduino -- the management server can act as a relay:
+
+1. Management server subscribes to `station:<shortcode>` using `centrifuge-js` (works in Node.js) or a [Go/Python Centrifugo client](https://centrifugal.dev/docs/transports/client_api).
+2. Management server extracts `sh_id`, `artist`, `title`, `album`, `is_live` from the full payload.
+3. Management server sends a flat `AutoDJNowPlaying` message (~200 bytes) to the Arduino over the management WebSocket (Section 3.6.2).
+
+This adds a dependency on the management server (Phase 3) and an extra network hop, but guarantees a small, predictable payload for the Arduino to parse. The decision between direct and relay can be deferred until Phase 2 implementation, when the actual Centrifugo payload size from `remote.wxyc.org` can be measured.
