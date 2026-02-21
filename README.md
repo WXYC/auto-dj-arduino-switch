@@ -117,13 +117,17 @@ To rotate the API key, update both:
 
 ## Running Tests
 
-Pure logic functions (`urlEncode`, `parseRadioShowID`, `currentHourMs`) are extracted into `utils.h`/`utils.cpp` and tested on desktop using GoogleTest with a minimal Arduino `String` shim. No Arduino hardware or SDK required.
+Pure logic functions are extracted into testable modules and tested on desktop using GoogleTest with a minimal Arduino `String` shim. No Arduino hardware or SDK required.
+
+- **`utils.h`/`utils.cpp`** -- `urlEncode`, `parseRadioShowID`, `currentHourMs`
+- **`state_machine.h`/`state_machine.cpp`** -- `tick()` (state transitions, retry logic, polling decisions)
+
+The state machine `tick()` function is a pure function: it takes a `Context` (persisted state) and `Inputs` (sensor snapshot + I/O results) and returns a `TickResult` (updated context + actions for the orchestrator). The `.ino` `loop()` is a thin orchestrator that performs I/O and delegates all decision logic to `tick()`.
 
 ```bash
-cd test
-cmake -B build
-cmake --build build
-cd build && ctest --output-on-failure
+cmake -B test/build test/
+cmake --build test/build
+cd test/build && ctest --output-on-failure
 ```
 
 Tests run automatically on push and PR via GitHub Actions (`.github/workflows/test.yml`).
