@@ -117,22 +117,19 @@ The existing USB-C and power input cutouts from the original GIGA R1 case design
 -   Add +0.5 mm clearance per side
 -   Ensure full latch access
 -   **Cutout dimensions**: 17.0 x 14.5 mm (16.0 x 13.5 mm housing + 0.5 mm clearance/side)
--   **Position**: left wall, centered on RJ45 jack at y = 38.354 mm on the Ethernet Shield
+-   **Position**: right wall (+X), where the Ethernet Shield's RJ45 jack faces. The GIGA R1's USB-C port is on this same wall. The RJ45 jack at board position (-4.318, 38.354) overhangs the board edge by 4.3 mm, protruding through the right wall.
 -   Must accommodate 4.3 mm board-edge overhang
 
 ## 5.2 SD Card Slot Access
 
--   Add +0.3 to +0.5 mm clearance
--   Slot should allow full insertion/ejection
--   Avoid sharp internal edges that block fingernail access
--   **Cutout dimensions**: 13.0 x 3.5 mm (12.0 x 2.5 mm slot + 0.5 mm clearance/side)
--   **Position**: right wall / opposite short wall, at x = 63.5 mm on the Ethernet Shield
--   Chamfer bottom edge for fingernail access
+The Ethernet Shield's micro-SD slot is at board position (63.5, 19.05), near the end of the shield opposite the RJ45. Because the Ethernet Shield (68.6 mm) is ~33 mm shorter than the GIGA R1 (101.6 mm), this end of the shield sits in the center of the case, ~35 mm from the nearest wall.
+
+**No SD card cutout is provided.** The SD card is inaccessible from any side wall in this enclosure. Open the case to access the SD card if needed. (The SD card is typically only used for debug logging, not required for normal operation.)
 
 ## 5.3 Terminal Cutout
 
 -   **Cutout dimensions**: 18.4 x 10.4 mm (18.0 x 10.0 mm Euroblock envelope + 0.2 mm printer tolerance/side)
--   **Position**: same wall as RJ45, to the right, >=6 mm edge-to-edge spacing, vertically centered with RJ45 cutout
+-   **Position**: right wall (+X), same wall as RJ45, offset in Y with >=6 mm edge-to-edge spacing, vertically centered with RJ45 cutout
 
 ------------------------------------------------------------------------
 
