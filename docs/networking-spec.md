@@ -24,14 +24,13 @@ This document covers:
 - Authentication and credential management for all connections
 - The management server protocol (WebSocket + HTTP fallback)
 - AzuraCast real-time now-playing via direct WebSocket (Centrifugo)
-- Implementation phases (a restructured and expanded version of the original roadmap)
+- Implementation phases
 
 Related documents:
 
 | Document | Scope |
 |----------|-------|
 | [remote-administration.md](remote-administration.md) | Parameter inventory: every configurable value, its current default, and why it might change |
-| [remote-access-roadmap.md](remote-access-roadmap.md) | Original phased plan for remote management (superseded by Sections 3-7 of this document) |
 | [wiring.md](wiring.md) | Hardware wiring: relay, LED, pin assignments |
 
 ### 1.4 Terminology
@@ -619,7 +618,7 @@ This is a flat structure designed for efficient ArduinoJson parsing. If the rela
 | `free_ram` | `integer` | Free heap bytes at time of error |
 | `count` | `integer` | Number of times this error has occurred since last report |
 
-The management server can relay these to Sentry or another error tracking service.
+Consecutive identical errors are batched on the Arduino side: `count` is incremented locally and the error report is sent periodically rather than on every occurrence. This avoids flooding the WebSocket with repeated errors (e.g., a flapping network connection). The management server can relay these to Sentry or another error tracking service, grouped by `module` and `code`.
 
 #### 3.6.3 Supported Commands
 
@@ -1721,7 +1720,7 @@ A CI check in `wxyc-shared` (`scripts/check-breaking-changes.js`) detects breaki
 
 ## 7. Implementation Roadmap
 
-The phases below are restructured from the [original roadmap](remote-access-roadmap.md). Protocol details, message formats, and credential specs now live in Sections 3-5 and are referenced by section number.
+Protocol details, message formats, and credential specs live in Sections 3-5 and are referenced by section number.
 
 ### 7.1 Phase 0: Automatic DST
 
@@ -1776,7 +1775,34 @@ struct RuntimeConfig {
 };
 ```
 
-**Architecture**: See the KVStore boot sequence diagram in the [original roadmap](remote-access-roadmap.md#phase-1-persistent-storage).
+**Architecture**:
+
+```mermaid
+flowchart TD
+    subgraph Boot["Boot Sequence"]
+        KV["KVStore\n(QSPI flash)"]
+        Defaults["config.h / secrets.h\n(compile-time defaults)"]
+        Config["Runtime Config\n(RAM struct)"]
+
+        KV -- "key exists?" --> Config
+        Defaults -- "fallback\n(first boot)" --> KV
+        KV -- "write default" --> KV
+    end
+
+    subgraph Runtime["Runtime"]
+        Config --> Net["Network Manager"]
+        Config --> HTTP["HTTP Clients"]
+        Config --> SM["State Machine"]
+    end
+
+    subgraph Remote["Remote Update"]
+        Server["Management Server"] -- "new value" --> Arduino
+        Arduino -- "write to KVStore" --> KV
+        Arduino -- "update RAM struct" --> Config
+    end
+```
+
+At boot, the firmware reads from KVStore. If a key is missing (first boot), it falls back to the compile-time `#define` from `config.h` / `secrets.h` and writes the default to KVStore. Subsequent boots use the stored value. Remote config updates write new values to KVStore; the firmware picks them up on the next boot or immediately if the parameter is hot-reloadable (Section 3.6.4).
 
 | File | Change |
 |------|--------|
@@ -1789,9 +1815,36 @@ struct RuntimeConfig {
 
 **Adds the primary network transport.** Can be developed in parallel with Phase 1.
 
-**Hardware**: Arduino Ethernet Shield 2 (W5500, SPI). CS on D10, SPI on D11-D13. No conflicts with existing relay (D2) or LED (D3).
+**Hardware**: Arduino Ethernet Shield 2 (W5500, SPI). Mounts directly on the Giga R1's Mega-compatible headers.
 
-**Software TLS**: `SSLClient` (OPEnSLab-NGO) wraps `EthernetClient` with BearSSL. Drop-in replacement for `WiFiSSLClient`.
+| Pin | Function | Notes |
+|-----|----------|-------|
+| D10 | Ethernet CS (chip select) | Default for Ethernet Shield 2; no conflict with relay (D2) or LED (D3) |
+| D11 | SPI MOSI | Shared SPI bus |
+| D12 | SPI MISO | Shared SPI bus |
+| D13 | SPI SCK | Shared SPI bus (also LED_BUILTIN on some boards, but not on Giga R1) |
+
+The shield also has an SD card slot (CS on D4), which can be ignored or used for local logging in the future.
+
+**Software TLS**: The W5500 handles TCP but not TLS. Two options:
+
+| Library | Approach | Tradeoffs |
+|---------|----------|-----------|
+| **SSLClient** (OPEnSLab-NGO) | BearSSL wrapper over any Arduino `Client` | Drop-in replacement for `WiFiSSLClient`; well-tested; needs trust anchors (root CA certs) compiled in |
+| **Mbed TLS** (native) | `mbedtls_ssl_*` API directly | Already in Mbed OS; more flexible; lower-level API, more code to write |
+
+`SSLClient` is the pragmatic choice. It wraps `EthernetClient` the same way `WiFiSSLClient` wraps the WiFi module's TLS:
+
+```cpp
+// WiFi transport (existing)
+WiFiSSLClient ssl;
+HttpClient http(ssl, host, 443);
+
+// Ethernet transport (new, same API)
+EthernetClient eth;
+SSLClient ssl(eth, TAs, NUM_TAs, A0);  // TAs = trust anchors, A0 = entropy pin
+HttpClient http(ssl, host, 443);
+```
 
 **Network abstraction** (`NetworkManager`):
 
@@ -1830,9 +1883,31 @@ classDiagram
 
 **NTP**: See Section 3.5.
 
-**Migrating HTTP clients**: `AzuraCastClient` and `FlowsheetClient` accept `NetworkManager&` instead of creating `WiFiSSLClient` directly. See the [original roadmap](remote-access-roadmap.md#migrating-http-clients) for before/after code.
+**Migrating HTTP clients**: `AzuraCastClient` and `FlowsheetClient` accept `NetworkManager&` instead of creating `WiFiSSLClient` directly:
 
-**Studio prerequisites**: Verify live Ethernet jack, register MAC with UNC ITS, confirm outbound port 443 access on wired VLAN.
+```cpp
+// Before (WiFi-only)
+bool AzuraCastClient::poll() {
+    WiFiSSLClient ssl;
+    HttpClient http(ssl, host, port);
+    // ...
+}
+
+// After (transport-agnostic)
+bool AzuraCastClient::poll(NetworkManager& net) {
+    Client& client = net.createClient();  // returns SSLClient or WiFiSSLClient
+    HttpClient http(client, host, port);
+    // ...
+}
+```
+
+The per-call client creation pattern is preserved. Over Ethernet this is unnecessary (the W5500 is stable), but it maintains a uniform interface and avoids creating a separate code path per transport.
+
+**Studio prerequisites**:
+
+1. **Verify that the WXYC studio has a live Ethernet jack.** University buildings typically have wall jacks, but they may be deactivated. Contact UNC ITS to activate one if needed.
+2. **Register the Ethernet shield's MAC address** with UNC ITS (same process as WiFi: [unc.edu/mydevices](https://unc.edu/mydevices)). The W5500's MAC is printed on the shield or can be set in software.
+3. **Confirm outbound access on port 443** from the wired VLAN. Campus wired networks sometimes have different firewall rules than WiFi.
 
 | File | Change |
 |------|--------|
@@ -1905,17 +1980,43 @@ flowchart TD
 
 ### 7.6 Phase 5: OTA Firmware Updates
 
-**Depends on Phases 1 + 3.** For changes that can't be expressed as config updates.
+**Depends on Phases 1 + 3.** For changes that can't be expressed as config updates. Ethernet makes this significantly more reliable: downloading a multi-hundred-KB binary over a stable wired connection is far safer than over WiFi.
 
-1. Firmware binary (`.bin`) hosted at a known URL (GitHub Releases, S3, or static file).
-2. Version manifest at a known URL with version number, binary URL, and SHA-256 hash.
-3. Arduino checks manifest on command (`check_update`) or on a periodic schedule.
-4. If newer, downloads binary to QSPI flash (staging area), verifies SHA-256, writes to boot flash.
-5. Reboot.
+```mermaid
+sequenceDiagram
+    participant Arduino
+    participant Server as Firmware Host
 
-**Safeguards**: SHA-256 verification, version check, QSPI staging, dual-bank boot (if supported), watchdog timer, Ethernet-only downloads, rollback command.
+    Arduino->>Server: GET /auto-dj/firmware/manifest.json
+    Server-->>Arduino: {"version": "1.3.0", "url": "/.../v1.3.0.bin", "sha256": "abcd..."}
 
-See the [original roadmap](remote-access-roadmap.md#phase-5-pull-based-ota-firmware-updates) for the full sequence diagram and safeguard details.
+    alt version > running version
+        Arduino->>Server: GET /auto-dj/firmware/v1.3.0.bin
+        Server-->>Arduino: (binary stream over Ethernet)
+        Note over Arduino: Stage to QSPI flash,<br/>verify SHA-256,<br/>write to boot flash
+        Arduino->>Arduino: NVIC_SystemReset()
+        Note over Arduino: Boots new firmware
+    else up to date
+        Note over Arduino: No action
+    end
+```
+
+**Safeguards** (OTA is the riskiest operation -- a bad update bricks the device until physical reflash):
+
+| Safeguard | Purpose |
+|-----------|---------|
+| **SHA-256 verification** | Reject corrupted or tampered binaries. Mbed OS includes `mbedtls` for this. |
+| **Version check** | Never downgrade unless explicitly commanded |
+| **QSPI staging** | Download to the 16 MB QSPI flash first, verify, then copy to boot flash. Avoids partial writes to the boot partition. |
+| **Dual-bank boot** | The STM32H747 has two flash banks; write to the inactive bank and swap on success (if supported by the Mbed OS bootloader) |
+| **Watchdog timer** | If the new firmware crashes in a boot loop, the watchdog resets to the previous bank after N failures |
+| **Manual trigger** | OTA is initiated by a `check_update` command, not automatically |
+| **Rollback command** | A `rollback_firmware` command reverts to the previous version |
+| **Ethernet preferred** | OTA downloads only proceed over Ethernet. Downloading a large binary over the unstable WiFi stack is too risky. If only WiFi is available, the `check_update` command returns an error suggesting the operator restore Ethernet first. |
+
+**Prerequisites**: Phase 1 (persistent storage for firmware version and boot state), Phase 3 (management channel for triggering update checks), and a CI pipeline that builds and publishes `.bin` artifacts on tagged releases.
+
+**Complexity note**: This phase is the most complex and is explicitly deferred. It requires understanding the Giga R1's bootloader and dual-bank flash layout, implementing a streaming HTTP download with QSPI flash write, SHA-256 verification, a watchdog timer, and CI changes. Hardware research (Open Question 7) must be completed before this phase can be scoped concretely.
 
 ### 7.7 Phase Summary
 
@@ -1998,8 +2099,6 @@ flowchart LR
 ---
 
 ## 8. Open Questions
-
-### From the original roadmap
 
 1. **Studio Ethernet jack:** Is there a live Ethernet jack in the WXYC studio? If not, request activation from UNC ITS. Hard prerequisite for Phase 2.
 
