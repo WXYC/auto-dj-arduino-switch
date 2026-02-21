@@ -1536,43 +1536,98 @@ The `FakeClient` infrastructure is built once and reused across all Arduino netw
 
 The `FlowsheetBackend` interface (Section 6.5) enables a second layer of testing: the state machine can be tested against a mock `FlowsheetBackend` without any HTTP parsing at all. This complements the `FakeClient` tests, which verify the HTTP layer in isolation.
 
-#### Server-side: request/response testing
+#### Arduino-side: WebSocket message testing
 
-The management server and Backend-Service endpoints need their own tests, using their native frameworks:
+The `ManagementClient` module (Section 7.4) serializes heartbeats, acks, and error reports, and deserializes commands and now-playing messages. These tests use a `FakeWebSocket` -- a test double that captures sent frames and plays back pre-loaded received frames, similar to how `FakeClient` works for HTTP.
 
-| Component | Framework | What to Test |
-|-----------|-----------|-------------|
-| **Management server** (TypeScript) | Jest or Vitest | WebSocket message parsing (heartbeat, ack, error), command serialization, Centrifugo relay transform, device status aggregation |
-| **Backend-Service** (TypeScript) | Jest | Flowsheet endpoints accept Auto DJ service account (Bearer PAT), `is_automation` DJ filtering, breakpoint entry creation |
-| **tubafrenzy** (Java) | JUnit (existing) | `isAutoDJRequest()` already tested; no new server-side tests needed for the Arduino client refactoring |
+| Direction | Message Type | Test Focus |
+|-----------|-------------|------------|
+| Arduino -> Server | `AutoDJHeartbeat` | All fields populated correctly; telemetry counters increment; `config_hash` matches active config; `last_track` is null when no track has been posted |
+| Arduino -> Server | `AutoDJAck` | `id` matches the command `id`; `status` reflects actual outcome (`ok`, `error`, `unknown_command`); `error` field populated on failure |
+| Arduino -> Server | `AutoDJErrorReport` | `level`/`code`/`module` populated correctly; `count` accumulates repeat errors; `free_ram` matches actual heap query |
+| Server -> Arduino | `AutoDJCommand` | Unknown `action` values produce `unknown_command` ack; `set_config` writes to KVStore (mock); `pause`/`resume` update state machine; `restart` triggers reset; string length limits enforced |
+| Server -> Arduino | `AutoDJNowPlaying` | `sh_id` change detection (same logic as AzuraCast polling); fields populate the track data used by flowsheet posting; `is_live` flag is surfaced |
 
-Server-side tests inject fake HTTP *requests* (not responses) and assert the server's behavior. For the management server WebSocket tests, a test client connects to the server and sends/receives JSON messages, asserting against the schemas in Section 5.2.
+Error cases: malformed JSON frames, missing required fields, oversized messages (ArduinoJson memory limits), and connection drops mid-frame.
 
-#### The contract: wxyc-shared as the shared test fixture
+#### Server-side: HTTP endpoint testing
 
-The `api.yaml` schemas (Section 5.2) serve as the contract between Arduino and server. Both sides test against the same type definitions, but from opposite directions:
+The management server and Backend-Service endpoints need their own tests, using their native frameworks.
+
+**Backend-Service** (Jest):
+
+| Endpoint | Test Focus |
+|----------|-----------|
+| `POST /flowsheet/join` | Accepts Auto DJ service account (Bearer PAT); returns `Show` with `id`; rejects expired or invalid tokens |
+| `POST /flowsheet` | Accepts `FlowsheetCreateSongFreeform` from Auto DJ; creates `FlowsheetSongEntry` linked to active show; accepts breakpoint message entry (`{"message": "BREAKPOINT"}`) |
+| `POST /flowsheet/end` | Ends the Auto DJ's active show; returns `Show` with `end_time` populated |
+| `GET /djs` | `is_automation` filter: `?is_automation=false` excludes Auto DJ; `?is_automation=true` returns only Auto DJ; unfiltered returns all |
+
+**tubafrenzy** (JUnit, existing): `isAutoDJRequest()` is already tested. No new server-side tests needed for the Arduino client refactoring -- the server's behavior doesn't change.
+
+#### Server-side: WebSocket and management testing
+
+The management server's WebSocket handling needs dedicated tests that exercise the same message types the Arduino produces and consumes. These are the server's analog to the Arduino's `FakeWebSocket` tests -- but from the opposite direction.
+
+**WebSocket message handling** (Jest or Vitest):
+
+| Scenario | Test Focus |
+|----------|-----------|
+| **Heartbeat ingestion** | Server receives `AutoDJHeartbeat` JSON -> updates `AutoDJDeviceStatus` -> last heartbeat timestamp updates -> admin API reflects new status |
+| **Command delivery** | Admin POSTs `{"action": "pause"}` -> server enqueues `AutoDJCommand` with unique `id` -> command appears on WebSocket as valid `AutoDJCommand` JSON -> `pending_commands` count increments |
+| **Ack processing** | Server receives `AutoDJAck` with matching `id` -> command dequeued -> `pending_commands` decrements -> ack with `status: "error"` triggers alert/log |
+| **Error report relay** | Server receives `AutoDJErrorReport` -> relayed to Sentry (mock) -> `level: "fatal"` triggers alert |
+| **Connection lifecycle** | WebSocket upgrade with valid `X-Auto-DJ-Key` -> accepted; invalid key -> 401; connection drop -> device status changes to `connected: false`; reconnect -> status restores |
+| **Stale heartbeat detection** | No heartbeat for >60s -> device marked offline; heartbeat resumes -> device marked online |
+
+**Centrifugo relay transform** (Jest or Vitest):
+
+The management server subscribes to AzuraCast's Centrifugo `station:main` channel and transforms the large nested now-playing payload into the flat `AutoDJNowPlaying` schema (Section 3.6.2). This transform needs its own tests:
+
+| Scenario | Test Focus |
+|----------|-----------|
+| **Normal transform** | Full AzuraCast now-playing JSON (fixture) -> extract `sh_id`, `artist`, `title`, `album`, `is_live` -> output matches `AutoDJNowPlaying` schema |
+| **Missing fields** | AzuraCast JSON with `null` song fields -> graceful handling (empty strings or skip) |
+| **Live DJ flag** | `live.is_live: true` -> `is_live: true` in output |
+| **Relay to Arduino** | Transformed message sent on WebSocket -> Arduino's `FakeWebSocket` receives valid `AutoDJNowPlaying` (this is an integration test bridging server and Arduino fixtures) |
+
+#### Shared test fixtures: wxyc-shared as the contract
+
+The `api.yaml` schemas (Section 5.2) serve as the contract between Arduino and server. Both sides test against the same type definitions, but from opposite directions.
+
+**How the types flow**:
 
 ```
-Arduino (C++)                    wxyc-shared (api.yaml)              Server (TypeScript)
-─────────────                    ──────────────────────              ───────────────────
-FakeClient loaded with           ◄── Schema defines ──►             Test client sends
-canonical JSON response          response shape                     canonical JSON to server
-
-Assert: parsed fields            AutoDJHeartbeat                    Assert: server accepts
-match expected values            AutoDJCommand                      and correctly processes
-                                 AutoDJAck                          the message
-Assert: sent request body        AutoDJNowPlaying
-matches schema                   AutoDJErrorReport                  Assert: server sends
-                                                                    valid schema to client
+api.yaml (source of truth)
+    |
+    ├── openapi-generator-cli ──► TypeScript types ──► Management server, Backend-Service, Admin UI
+    |                                                   (compile-time type checking)
+    |
+    ├── Type guards (Section 5.3) ──► isHeartbeat(), isCommand(), etc.
+    |                                  (runtime validation in TypeScript)
+    |
+    └── Manual contract (Section 5.4) ──► Arduino ArduinoJson code
+                                          (human-verified against schema)
 ```
 
-When a schema changes in `api.yaml`:
+**Canonical JSON fixtures** for each message type should be maintained as shared test data files. Each fixture is the single source of truth for "what does a valid message of this type look like":
+
+| Fixture | Arduino Test Uses It As | Server Test Uses It As |
+|---------|------------------------|----------------------|
+| `heartbeat.json` | `FakeWebSocket` outbound: assert serialized output matches | Inbound: parse and assert device status updates |
+| `command.json` | `FakeWebSocket` inbound: assert parsed fields and side effects | Outbound: assert serialization matches when admin issues command |
+| `ack.json` | `FakeWebSocket` outbound: assert serialized output matches | Inbound: assert command dequeue and status tracking |
+| `now_playing.json` | `FakeWebSocket` inbound: assert track data extraction | Outbound: assert Centrifugo transform output matches |
+| `error_report.json` | `FakeWebSocket` outbound: assert serialized output matches | Inbound: assert Sentry relay and alert logic |
+
+In practice, the Arduino test fixtures live in `test/fixtures/` in the Arduino repo, and the server test fixtures live in the management server's test directory. They are not literally the same files (different repos, different languages), but they **must represent the same JSON shapes**. When a schema changes in `api.yaml`:
 
 1. **TypeScript consumers** get compile errors from generated types (automatic)
 2. **Arduino code** must be manually updated (see Section 5.4 contract table)
 3. **Test fixtures** on both sides must be updated to match the new schema
+4. **Type guards** (Section 5.3) catch runtime mismatches in TypeScript consumers
 
-The `FakeClient` response fixtures should be maintained as canonical test data files (not inline strings) so they can be cross-referenced against the `api.yaml` schemas during code review.
+A CI check in `wxyc-shared` (`scripts/check-breaking-changes.js`) detects breaking schema changes before they reach downstream consumers.
 
 ---
 
