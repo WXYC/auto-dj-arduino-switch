@@ -146,7 +146,14 @@ The Arduino supports both tubafrenzy and Backend-Service as flowsheet targets. A
 | **Breakpoints** | Server auto-inserts via `autoBreakpoint=true` | Client must POST explicit breakpoint entry |
 | **DJ ID** | `"0"` (string, no DJ table) | Auto-incremented integer from DJ table |
 
-**Configuration**: In `config.h`, `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel. The flag also determines which credentials and host/port to use.
+**Data flow and mirroring**: Backend-Service mirrors flowsheet data to tubafrenzy. When the Arduino targets Backend-Service, tubafrenzy's flowsheet is populated via this mirror -- no data is lost. This means the dual-backend support serves two purposes:
+
+1. **Migration**: When Backend-Service is ready, switch the Arduino to target it. tubafrenzy continues to receive data via the mirror.
+2. **Rollback**: If Backend-Service has a bug that breaks flowsheet writes, switch back to tubafrenzy via the management channel without a reflash. The Arduino resumes writing to tubafrenzy directly. Backend-Service stops receiving entries until the bug is fixed and the Arduino is switched back.
+
+The rollback capability is why `FLOWSHEET_BACKEND` is a runtime parameter (KVStore, after Phase 1) rather than a compile-time-only flag. It requires a restart (not hot-reloadable) because switching backends mid-show would leave the new client without an active show context (Section 6.6).
+
+**Configuration**: In `config.h`, `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel's `set_config` command (restart required). The flag also determines which credentials and host/port to use.
 
 See [Section 6](#6-dual-backend-flowsheet-client) for the full dual-backend client specification.
 
@@ -750,11 +757,15 @@ Consecutive identical errors are batched on the Arduino side: `count` is increme
 | Config key | Hot-reloadable? | Notes |
 |-----------|----------------|-------|
 | `poll_interval_ms` | Yes | Takes effect on next poll cycle |
-| `wifi_ssid` / `wifi_pass` | No | Requires restart; only affects the WiFi fallback transport |
+| `wifi_ssid` / `wifi_pass` | No | Requires restart (see below) |
 | `api_key` | Yes | Takes effect on next HTTP request |
 | `utc_offset` | Yes | Takes effect on next `currentHourMs()` call |
-| `flowsheet_backend` | No | Requires restart; changes which client and credentials are used |
+| `flowsheet_backend` | No | Requires restart (see below) |
 | `backend_service_token` | Yes | Takes effect on next Backend-Service request |
+
+**Why `wifi_ssid` / `wifi_pass` require restart**: WiFi credentials are consumed by `WiFi.begin(ssid, password)` during the connection sequence. The WiFi module's firmware holds onto the credentials it was given at `begin()` -- updating the `RuntimeConfig` struct alone doesn't reconnect. Calling `WiFi.disconnect()` + `WiFi.begin()` with new credentials would block the `loop()` for up to 36 seconds (the Giga R1 firmware bug). A restart sequences this cleanly through the normal boot path. Since WiFi is only the fallback transport (Section 2.2), this is low-urgency.
+
+**Why `flowsheet_backend` requires restart**: Switching backends changes which `FlowsheetBackend` implementation is active (`TubafrenzyBackend` vs `BackendServiceBackend`). These are different objects with different internal state -- different hosts, auth headers, and show IDs (`radioShowID` vs `Show.id`). Switching mid-show would leave the new client without an active show context, since it never called `startShow()`. A restart cleanly ends the current show and starts fresh on the new backend. See Section 2.3 for the migration and rollback rationale.
 
 #### 3.6.5 Keepalive Strategy
 
