@@ -130,7 +130,7 @@ This means:
 | **TLS** | The W5500 handles TCP but not TLS. Software TLS is required for HTTPS over Ethernet (via `SSLClient` + BearSSL or Mbed TLS). The STM32H747's Cortex-M7 at 480 MHz has ample power for this. `WiFiSSLClient` handles TLS in the WiFi module's firmware and is unaffected. |
 | **Existing infra** | The device already makes outbound HTTPS calls to `remote.wxyc.org` (AzuraCast) and `www.wxyc.info` (tubafrenzy). |
 
-**NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The `NTPClient` library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See Section 3.5.
+**NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The `NTPClient` library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See [Section 3.5](#35-outbound-udp-ntp-time-sync).
 
 ### 2.3 Dual-Backend Architecture
 
@@ -148,7 +148,7 @@ The Arduino supports both tubafrenzy and Backend-Service as flowsheet targets. A
 
 **Configuration**: In `config.h`, `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel. The flag also determines which credentials and host/port to use.
 
-See Section 6 for the full dual-backend client specification.
+See [Section 6](#6-dual-backend-flowsheet-client) for the full dual-backend client specification.
 
 ### 2.4 Management Server
 
@@ -158,14 +158,14 @@ The management server is the remote administration layer for the Arduino. It pro
 
 | Responsibility | Description | Protocol reference |
 |----------------|-------------|-------------------|
-| **Heartbeat tracking** | Receive periodic heartbeats from the Arduino (every 30s over WebSocket, every 60s over HTTP). Maintain a `AutoDJDeviceStatus` record with last-seen timestamp, uptime, transport, error counts. Mark the device offline if no heartbeat arrives within 60s. | Section 3.6.2, 3.7 |
-| **Command dispatch** | Accept commands from the admin UI (`pause`, `resume`, `end_show`, `set_config`, `restart`, `ping`), enqueue them, and deliver them to the Arduino over WebSocket or HTTP poll. Track pending commands until acknowledged. | Section 3.6.3, 3.8 |
-| **Acknowledgment processing** | Receive acks from the Arduino confirming command execution. Dequeue the command, update status. Surface errors to the admin UI. | Section 3.6.2 |
-| **Error report relay** | Receive structured error reports from the Arduino and forward them to Sentry or another error tracking service. Alert on `fatal`-level errors. | Section 3.6.2 |
-| **Credential rotation** | Push new API keys or Backend-Service PATs to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | Section 4.6 |
-| **Admin API** | Expose device status and command endpoints to the admin UI, authenticated via Better Auth (session cookies or JWT, `stationManager` role). | Section 3.8, 4.5 |
+| **Heartbeat tracking** | Receive periodic heartbeats from the Arduino (every 30s over WebSocket, every 60s over HTTP). Maintain a `AutoDJDeviceStatus` record with last-seen timestamp, uptime, transport, error counts. Mark the device offline if no heartbeat arrives within 60s. | [Section 3.6.2](#362-message-types), [3.7](#37-http-fallback-management-polling-wifi) |
+| **Command dispatch** | Accept commands from the admin UI (`pause`, `resume`, `end_show`, `set_config`, `restart`, `ping`), enqueue them, and deliver them to the Arduino over WebSocket or HTTP poll. Track pending commands until acknowledged. | [Section 3.6.3](#363-supported-commands), [3.8](#38-server-side-endpoints) |
+| **Acknowledgment processing** | Receive acks from the Arduino confirming command execution. Dequeue the command, update status. Surface errors to the admin UI. | [Section 3.6.2](#362-message-types) |
+| **Error report relay** | Receive structured error reports from the Arduino and forward them to Sentry or another error tracking service. Alert on `fatal`-level errors. | [Section 3.6.2](#362-message-types) |
+| **Credential rotation** | Push new API keys or Backend-Service PATs to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | [Section 4.6](#46-credential-rotation-protocol) |
+| **Admin API** | Expose device status and command endpoints to the admin UI, authenticated via Better Auth (session cookies or JWT, `stationManager` role). | [Section 3.8](#38-server-side-endpoints), [4.5](#45-management-server-auth-admin-facing) |
 
-**What the management server does NOT do**: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The management server handles only device management -- it never touches flowsheet data or track metadata. (The relay architecture was considered and rejected; see Appendix B.)
+**What the management server does NOT do**: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket ([Section 3.9](#39-azuracast-centrifugo-direct-websocket)). The management server handles only device management -- it never touches flowsheet data or track metadata. (The relay architecture was considered and rejected; see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details).)
 
 **Dual-transport interface**: The management server exposes the same logical operations over two transports to match the Arduino's network mode:
 
@@ -174,14 +174,14 @@ The management server is the remote administration layer for the Arduino. It pro
 | **WebSocket** (`/api/auto-dj/ws`) | Ethernet (primary) | Persistent bidirectional connection | Real-time |
 | **HTTP** (`/api/auto-dj/heartbeat`, `/api/auto-dj/commands`) | WiFi (fallback) | Short polling every 60s | Up to 60s |
 
-The Arduino determines which transport to use based on `NetworkManager` state (Section 2.2). The management server accepts both simultaneously -- it does not need to know the Arduino's current transport mode.
+The Arduino determines which transport to use based on `NetworkManager` state ([Section 2.2](#22-transport-strategy-ethernet-primary-wifi-fallback)). The management server accepts both simultaneously -- it does not need to know the Arduino's current transport mode.
 
-**Auth model**: Two audiences, two auth mechanisms (Sections 4.4, 4.5):
+**Auth model**: Two audiences, two auth mechanisms (Sections [4.4](#44-management-server-auth-arduino-facing), [4.5](#45-management-server-auth-admin-facing)):
 
 - **Arduino-facing**: `X-Auto-DJ-Key` header (shared secret, timing-safe comparison)
 - **Admin-facing**: Better Auth session/JWT (`stationManager` role required)
 
-**Server choice**: Backend-Service (Express/Node.js) is a natural fit -- it already has WebSocket infrastructure via the `ws` package, uses Better Auth for admin authentication, and is the actively maintained backend. A standalone lightweight service (Hono or Fastify on Railway) is an alternative that keeps the management concern decoupled. See Appendix A for the full comparison.
+**Server choice**: Backend-Service (Express/Node.js) is a natural fit -- it already has WebSocket infrastructure via the `ws` package, uses Better Auth for admin authentication, and is the actively maintained backend. A standalone lightweight service (Hono or Fastify on Railway) is an alternative that keeps the management concern decoupled. See [Appendix A](#appendix-a-server-choice-analysis) for the full comparison.
 
 ### 2.5 AzuraCast (Now-Playing Source)
 
@@ -196,18 +196,18 @@ AzuraCast exposes now-playing data through two interfaces. The Arduino uses both
 
 Both interfaces are **public** -- no authentication required. Both return the same logical data (`sh_id`, `artist`, `title`, `album`, `is_live`). The ArduinoJson filter document is identical for both. The `AzuraCastClient` consumes the same fields regardless of source.
 
-**Dual-mode strategy** (Section 3.9.2):
+**Dual-mode strategy** ([Section 3.9.2](#392-dual-mode-architecture)):
 
 - **Ethernet (push mode)**: Subscribe to Centrifugo WebSocket for near-real-time track change notifications. A 60-second safety-net HTTP poll catches any missed messages.
 - **WiFi (poll mode)**: Poll the static HTTP endpoint every 20 seconds. No persistent connections. This is the current production behavior.
 
-**What AzuraCast is NOT**: AzuraCast is an external system operated by WXYC's streaming infrastructure team, not something this project builds or deploys. The Arduino treats it as a read-only data source. AzuraCast has no knowledge of the Arduino, the flowsheet, or the management server. The now-playing feed is completely independent of the management channel (Section 2.4).
+**What AzuraCast is NOT**: AzuraCast is an external system operated by WXYC's streaming infrastructure team, not something this project builds or deploys. The Arduino treats it as a read-only data source. AzuraCast has no knowledge of the Arduino, the flowsheet, or the management server. The now-playing feed is completely independent of the management channel ([Section 2.4](#24-management-server)).
 
-See Section 3.2 for the HTTP polling protocol and Section 3.9 for the Centrifugo WebSocket protocol.
+See [Section 3.2](#32-outbound-http-azuracast-now-playing) for the HTTP polling protocol and [Section 3.9](#39-azuracast-centrifugo-direct-websocket) for the Centrifugo WebSocket protocol.
 
 ### 2.6 Admin UI
 
-The admin UI is a web dashboard that gives station managers remote visibility into the Arduino's state and the ability to issue commands to it. It communicates exclusively with the management server (Section 2.4) -- it never talks to the Arduino directly.
+The admin UI is a web dashboard that gives station managers remote visibility into the Arduino's state and the ability to issue commands to it. It communicates exclusively with the management server ([Section 2.4](#24-management-server)) -- it never talks to the Arduino directly.
 
 **Capabilities**:
 
@@ -218,9 +218,9 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 | **Command history** | (derived from status) | View pending commands and their ack status |
 | **Error visibility** | (derived from status) | View recent error reports relayed from the Arduino |
 
-**Auth**: Better Auth session cookies or JWT. Only users with the `stationManager` role (or a to-be-defined `admin` capability) can access these endpoints (Section 4.5).
+**Auth**: Better Auth session cookies or JWT. Only users with the `stationManager` role (or a to-be-defined `admin` capability) can access these endpoints ([Section 4.5](#45-management-server-auth-admin-facing)).
 
-**Scope**: Open Question 4 asks whether the admin UI should be a full dashboard or a minimal status page. The initial implementation should be minimal -- the management server's REST API is the primary contract, and a simple UI can be layered on top.
+**Scope**: [Open Question 4](#8-open-questions) asks whether the admin UI should be a full dashboard or a minimal status page. The initial implementation should be minimal -- the management server's REST API is the primary contract, and a simple UI can be layered on top.
 
 **Deployment**: Not yet decided. Options include:
 
@@ -228,9 +228,9 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 - A standalone single-page app
 - A server-rendered page served by Backend-Service itself
 
-**Types consumed**: The admin UI imports `AutoDJDeviceStatus` and `AutoDJHeartbeat` from `wxyc-shared` (Section 5.5). These types are generated from `api.yaml`, so the UI gets compile-time type safety against the management server's responses.
+**Types consumed**: The admin UI imports `AutoDJDeviceStatus` and `AutoDJHeartbeat` from `wxyc-shared` ([Section 5.5](#55-consumer-matrix)). These types are generated from `api.yaml`, so the UI gets compile-time type safety against the management server's responses.
 
-**Phase**: The admin UI is part of Phase 3 (Section 7.4), tracked as a 14-day task (`p3d`) that runs in parallel with the WebSocket management client work.
+**Phase**: The admin UI is part of Phase 3 ([Section 7.4](#74-phase-3-websocket-management--azuracast-direct-websocket)), tracked as a 14-day task (`p3d`) that runs in parallel with the WebSocket management client work.
 
 ---
 
@@ -456,7 +456,7 @@ Note: The `show_id` is implicit -- Backend-Service tracks the active show for ea
 
 #### 3.4.4 Add Breakpoint (Backend-Service only)
 
-Unlike tubafrenzy (which auto-inserts breakpoints via `autoBreakpoint=true`), Backend-Service requires the client to explicitly POST a breakpoint entry at the top of each hour. See Section 6.6 for the abstraction that normalizes this.
+Unlike tubafrenzy (which auto-inserts breakpoints via `autoBreakpoint=true`), Backend-Service requires the client to explicitly POST a breakpoint entry at the top of each hour. See [Section 6.6](#66-show-lifecycle-differences) for the abstraction that normalizes this.
 
 **Request body** (message entry with breakpoint content):
 
@@ -702,7 +702,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `album` | `string` | Album title |
 | `is_live` | `boolean` | Whether a live DJ is streaming |
 
-This is a flat structure designed for efficient ArduinoJson parsing. If the relay architecture is used (Appendix B), the management server extracts these fields from AzuraCast's Centrifugo feed and sends this simplified format. If the Arduino subscribes directly to Centrifugo (Section 3.9, recommended), this message type is not used -- the Arduino parses the Centrifugo payload itself.
+This is a flat structure designed for efficient ArduinoJson parsing. If the relay architecture is used ([Appendix B](#appendix-b-azuracast-centrifugo-integration-details)), the management server extracts these fields from AzuraCast's Centrifugo feed and sends this simplified format. If the Arduino subscribes directly to Centrifugo ([Section 3.9](#39-azuracast-centrifugo-direct-websocket), recommended), this message type is not used -- the Arduino parses the Centrifugo payload itself.
 
 **Error Report** (Arduino → Server):
 
@@ -777,7 +777,7 @@ When the Arduino is on WiFi (no persistent connections), the management channel 
 | **URL** | `https://<management-server>/api/auto-dj/heartbeat` |
 | **Auth** | `X-Auto-DJ-Key: <key>` |
 | **Content-Type** | `application/json` |
-| **Body** | Same JSON as the WebSocket heartbeat message (Section 3.6.2) |
+| **Body** | Same JSON as the WebSocket heartbeat message ([Section 3.6.2](#362-message-types)) |
 | **Response** | 200 OK |
 
 **Command poll** (Arduino → Server):
@@ -816,7 +816,7 @@ AzuraCast embeds a [Centrifugo](https://centrifugal.dev/) real-time messaging se
 | **Endpoint** | `wss://remote.wxyc.org/api/live/nowplaying/websocket` |
 | **Auth** | None (public, no token required) |
 | **Transport** | Ethernet only (persistent WebSocket) |
-| **Fallback** | HTTP polling (Section 3.2) over WiFi or when WebSocket is unavailable |
+| **Fallback** | HTTP polling ([Section 3.2](#32-outbound-http-azuracast-now-playing)) over WiFi or when WebSocket is unavailable |
 
 **Connection sequence**:
 
@@ -844,7 +844,7 @@ sequenceDiagram
     Note right of Arduino: recover: true replays<br/>messages missed during disconnect
 ```
 
-The `recover: true` flag enables Centrifugo's connection recovery -- on reconnect, the server replays messages missed during the disconnection window. The station shortcode must be verified -- see Open Question 9.
+The `recover: true` flag enables Centrifugo's connection recovery -- on reconnect, the server replays messages missed during the disconnection window. The station shortcode must be verified -- see [Open Question 9](#8-open-questions).
 
 **Relevant fields in `np`**:
 
@@ -856,7 +856,7 @@ The `recover: true` flag enables Centrifugo's connection recovery -- on reconnec
 | `np.now_playing.song.album` | `string` | Flowsheet entry |
 | `np.live.is_live` | `bool` | Live DJ detection |
 
-These are the same fields extracted by the HTTP polling endpoint (Section 3.2). The ArduinoJson filter document is identical.
+These are the same fields extracted by the HTTP polling endpoint ([Section 3.2](#32-outbound-http-azuracast-now-playing)). The ArduinoJson filter document is identical.
 
 **Sources**: [AzuraCast Now Playing Data APIs](https://www.azuracast.com/docs/developers/now-playing-data/), [AzuraCast HPNP SSE example](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)
 
@@ -888,7 +888,7 @@ stateDiagram-v2
 
 #### 3.9.3 Why Direct (Not Relayed)
 
-The original design (see Appendix B) assumed the Arduino could not subscribe to Centrifugo directly, requiring the management server to act as a relay. This assumption was wrong: AzuraCast's Centrifugo endpoint uses standard WebSocket with a simple JSON subscription message and no authentication. The Arduino can connect directly using the `ArduinoWebsockets` library.
+The original design (see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details)) assumed the Arduino could not subscribe to Centrifugo directly, requiring the management server to act as a relay. This assumption was wrong: AzuraCast's Centrifugo endpoint uses standard WebSocket with a simple JSON subscription message and no authentication. The Arduino can connect directly using the `ArduinoWebsockets` library.
 
 Direct subscription is simpler:
 
@@ -916,9 +916,9 @@ filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["live"][
 // Same filter pattern for "pub" messages
 ```
 
-If the Centrifugo payload exceeds ArduinoJson's practical parsing limits on the Giga R1 (~16 KB with filter), the relay approach (Appendix B) becomes necessary -- the management server would extract the relevant fields and send a flat ~200-byte `AutoDJNowPlaying` message.
+If the Centrifugo payload exceeds ArduinoJson's practical parsing limits on the Giga R1 (~16 KB with filter), the relay approach ([Appendix B](#appendix-b-azuracast-centrifugo-integration-details)) becomes necessary -- the management server would extract the relevant fields and send a flat ~200-byte `AutoDJNowPlaying` message.
 
-See Appendix B for the relay alternative and detailed Centrifugo integration notes.
+See [Appendix B](#appendix-b-azuracast-centrifugo-integration-details) for the relay alternative and detailed Centrifugo integration notes.
 
 ---
 
@@ -1128,7 +1128,7 @@ This ensures that a bad credential push doesn't permanently brick the WiFi fallb
 
 - **Transport security**: All communication is over TLS (BearSSL via `SSLClient` on Ethernet, `WiFiSSLClient` on WiFi). Credentials are encrypted in transit.
 - **Storage security**: KVStore writes to flash in plaintext. An attacker with physical access to the board could read the flash. This is acceptable -- physical access to the studio already implies access to the mixing board, network, and everything else.
-- **Command authentication**: Commands are authenticated by the `X-Auto-DJ-Key` header (management server) or Bearer token (Backend-Service). A compromised key would allow unauthorized actions. Key rotation (Section 4.6) mitigates this.
+- **Command authentication**: Commands are authenticated by the `X-Auto-DJ-Key` header (management server) or Bearer token (Backend-Service). A compromised key would allow unauthorized actions. Key rotation ([Section 4.6](#46-credential-rotation-protocol)) mitigates this.
 - **Command validation**: The Arduino must validate all command payloads. Reject unknown actions, enforce maximum string lengths, and never execute arbitrary code from the server.
 
 ---
@@ -1159,7 +1159,7 @@ Breaking change detection: `scripts/check-breaking-changes.js` compares the gene
 
 ### 5.2 New Types for api.yaml
 
-The following OpenAPI 3.0 schema blocks are designed to be added to `api.yaml` under `components/schemas`. They formalize the WebSocket message types from Section 3.6.2.
+The following OpenAPI 3.0 schema blocks are designed to be added to `api.yaml` under `components/schemas`. They formalize the WebSocket message types from [Section 3.6.2](#362-message-types).
 
 #### 5.2.1 WebSocket Message Envelope
 
@@ -1565,11 +1565,11 @@ The `is_automation` field on `DJ`/`NewDJ` schemas will also propagate to:
 - **Swift** (wxyc-ios-64) via existing code generation
 - **Kotlin** (WXYC-Android) via existing code generation
 
-A follow-up PR to each mobile app is needed to handle this field (e.g., filtering Auto DJ from DJ lists, displaying automated shows differently). See Open Question 16.
+A follow-up PR to each mobile app is needed to handle this field (e.g., filtering Auto DJ from DJ lists, displaying automated shows differently). See [Open Question 16](#8-open-questions).
 
 ### 5.6 AsyncAPI Consideration
 
-OpenAPI 3.0 doesn't natively describe WebSocket protocols. The schemas are added to `api.yaml` as `components/schemas` only (no path definitions for WebSocket messages). The message direction and lifecycle are documented in prose with Mermaid sequence diagrams (Section 3.6).
+OpenAPI 3.0 doesn't natively describe WebSocket protocols. The schemas are added to `api.yaml` as `components/schemas` only (no path definitions for WebSocket messages). The message direction and lifecycle are documented in prose with Mermaid sequence diagrams ([Section 3.6](#36-websocket-management-channel)).
 
 If a formal WebSocket contract is needed later, AsyncAPI 2.x can reference these same schemas. For now, the WebSocket has exactly one consumer (the Arduino), and the prose documentation is sufficient.
 
@@ -1600,7 +1600,7 @@ The flag also determines:
 
 ### 6.2 tubafrenzy Client (existing)
 
-Implemented in `flowsheet_client.cpp` and `flowsheet_client.h`. See Section 3.3 for the full protocol specification.
+Implemented in `flowsheet_client.cpp` and `flowsheet_client.h`. See [Section 3.3](#33-outbound-http-tubafrenzy-flowsheet-operations) for the full protocol specification.
 
 Three operations:
 
@@ -1621,7 +1621,7 @@ Three operations:
 
 ### 6.3 Backend-Service Client (new)
 
-To be implemented in `backend_service_client.cpp` and `backend_service_client.h`. See Section 3.4 for the full protocol specification.
+To be implemented in `backend_service_client.cpp` and `backend_service_client.h`. See [Section 3.4](#34-outbound-http-backend-service-flowsheet-operations) for the full protocol specification.
 
 Three operations (plus breakpoints):
 
@@ -1741,13 +1741,13 @@ The `FlowsheetBackend` interface normalizes these differences:
 
 ### 6.7 Testing Strategy
 
-Testing networking code requires injecting fake network responses without real connections. The same `Client&` dependency injection that enables the `NetworkManager` abstraction (Section 7.3) also enables desktop testing with pre-loaded HTTP responses.
+Testing networking code requires injecting fake network responses without real connections. The same `Client&` dependency injection that enables the `NetworkManager` abstraction ([Section 7.3](#73-phase-2-ethernet-shield-integration)) also enables desktop testing with pre-loaded HTTP responses.
 
 #### Arduino-side: FakeClient pattern
 
 The [Phase B.1 DI refactor](https://github.com/WXYC/auto-dj-arduino-switch) introduces a `FakeClient` -- a concrete `Client` subclass that stores a pre-loaded HTTP response buffer and captures all written bytes (the request) for assertion. The real `ArduinoHttpClient` and `ArduinoJson` libraries compile on desktop against a minimal Arduino shim and parse `FakeClient` responses identically to real network responses.
 
-Each protocol in Section 3 maps to specific `FakeClient` test fixtures:
+Each protocol in [Section 3](#3-protocol-reference) maps to specific `FakeClient` test fixtures:
 
 | Protocol (Section) | FakeClient Response | Key Assertions |
 |--------------------|--------------------|----------------|
@@ -1764,11 +1764,11 @@ Each protocol in Section 3 maps to specific `FakeClient` test fixtures:
 
 The `FakeClient` infrastructure is built once and reused across all Arduino networking tests. Error cases (HTTP 500, malformed JSON, missing fields, timeouts) are tested by loading the appropriate bad response into `FakeClient`.
 
-The `FlowsheetBackend` interface (Section 6.5) enables a second layer of testing: the state machine can be tested against a mock `FlowsheetBackend` without any HTTP parsing at all. This complements the `FakeClient` tests, which verify the HTTP layer in isolation.
+The `FlowsheetBackend` interface ([Section 6.5](#65-client-abstraction-on-arduino)) enables a second layer of testing: the state machine can be tested against a mock `FlowsheetBackend` without any HTTP parsing at all. This complements the `FakeClient` tests, which verify the HTTP layer in isolation.
 
 #### Arduino-side: WebSocket message testing
 
-The `ManagementClient` module (Section 7.4) serializes heartbeats, acks, and error reports, and deserializes commands and now-playing messages. These tests use a `FakeWebSocket` -- a test double that captures sent frames and plays back pre-loaded received frames, similar to how `FakeClient` works for HTTP.
+The `ManagementClient` module ([Section 7.4](#74-phase-3-websocket-management--azuracast-direct-websocket)) serializes heartbeats, acks, and error reports, and deserializes commands and now-playing messages. These tests use a `FakeWebSocket` -- a test double that captures sent frames and plays back pre-loaded received frames, similar to how `FakeClient` works for HTTP.
 
 | Direction | Message Type | Test Focus |
 |-----------|-------------|------------|
@@ -1812,7 +1812,7 @@ The management server's WebSocket handling needs dedicated tests that exercise t
 
 **AzuraCast Centrifugo WebSocket parsing** (Arduino-side, GoogleTest):
 
-The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The `AzuraCastClient` must parse both the initial `connect` response and subsequent `pub` messages. These use `FakeWebSocket` with pre-loaded Centrifugo JSON:
+The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket ([Section 3.9](#39-azuracast-centrifugo-direct-websocket)). The `AzuraCastClient` must parse both the initial `connect` response and subsequent `pub` messages. These use `FakeWebSocket` with pre-loaded Centrifugo JSON:
 
 | Scenario | Test Focus |
 |----------|-----------|
@@ -1823,9 +1823,9 @@ The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9
 | **Live DJ flag** | `live.is_live: true` → `isLiveDJ()` true |
 | **Oversized payload** | Centrifugo response exceeding ArduinoJson memory budget → graceful failure, fall back to HTTP poll |
 
-**Centrifugo relay transform** (management server, Jest or Vitest -- only if relay architecture is used, see Appendix B):
+**Centrifugo relay transform** (management server, Jest or Vitest -- only if relay architecture is used, see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details)):
 
-If the direct WebSocket proves impractical and the management server relays now-playing data, the transform from the full Centrifugo payload to the flat `AutoDJNowPlaying` schema (Section 3.6.2) needs its own tests:
+If the direct WebSocket proves impractical and the management server relays now-playing data, the transform from the full Centrifugo payload to the flat `AutoDJNowPlaying` schema ([Section 3.6.2](#362-message-types)) needs its own tests:
 
 | Scenario | Test Focus |
 |----------|-----------|
@@ -1835,7 +1835,7 @@ If the direct WebSocket proves impractical and the management server relays now-
 
 #### Shared test fixtures: wxyc-shared as the contract
 
-The `api.yaml` schemas (Section 5.2) serve as the contract between Arduino and server. Both sides test against the same type definitions, but from opposite directions.
+The `api.yaml` schemas ([Section 5.2](#52-new-types-for-apiyaml)) serve as the contract between Arduino and server. Both sides test against the same type definitions, but from opposite directions.
 
 **How the types flow**:
 
@@ -1845,10 +1845,10 @@ api.yaml (source of truth)
     ├── openapi-generator-cli ──► TypeScript types ──► Management server, Backend-Service, Admin UI
     |                                                   (compile-time type checking)
     |
-    ├── Type guards (Section 5.3) ──► isHeartbeat(), isCommand(), etc.
+    ├── Type guards ([Section 5.3](#53-typescript-extensions)) ──► isHeartbeat(), isCommand(), etc.
     |                                  (runtime validation in TypeScript)
     |
-    └── Manual contract (Section 5.4) ──► Arduino ArduinoJson code
+    └── Manual contract ([Section 5.4](#54-arduino-contract)) ──► Arduino ArduinoJson code
                                           (human-verified against schema)
 ```
 
@@ -1865,9 +1865,9 @@ api.yaml (source of truth)
 In practice, the Arduino test fixtures live in `test/fixtures/` in the Arduino repo, and the server test fixtures live in the management server's test directory. They are not literally the same files (different repos, different languages), but they **must represent the same JSON shapes**. When a schema changes in `api.yaml`:
 
 1. **TypeScript consumers** get compile errors from generated types (automatic)
-2. **Arduino code** must be manually updated (see Section 5.4 contract table)
+2. **Arduino code** must be manually updated (see [Section 5.4](#54-arduino-contract) contract table)
 3. **Test fixtures** on both sides must be updated to match the new schema
-4. **Type guards** (Section 5.3) catch runtime mismatches in TypeScript consumers
+4. **Type guards** ([Section 5.3](#53-typescript-extensions)) catch runtime mismatches in TypeScript consumers
 
 A CI check in `wxyc-shared` (`scripts/check-breaking-changes.js`) detects breaking schema changes before they reach downstream consumers.
 
@@ -1957,7 +1957,7 @@ flowchart TD
     end
 ```
 
-At boot, the firmware reads from KVStore. If a key is missing (first boot), it falls back to the compile-time `#define` from `config.h` / `secrets.h` and writes the default to KVStore. Subsequent boots use the stored value. Remote config updates write new values to KVStore; the firmware picks them up on the next boot or immediately if the parameter is hot-reloadable (Section 3.6.4).
+At boot, the firmware reads from KVStore. If a key is missing (first boot), it falls back to the compile-time `#define` from `config.h` / `secrets.h` and writes the default to KVStore. Subsequent boots use the stored value. Remote config updates write new values to KVStore; the firmware picks them up on the next boot or immediately if the parameter is hot-reloadable ([Section 3.6.4](#364-hot-reload-behavior)).
 
 | File | Change |
 |------|--------|
@@ -2034,9 +2034,9 @@ classDiagram
     NetworkManager --> WifiTransport
 ```
 
-**Failover**: `update()` checks the active transport; if disconnected, tries Ethernet first, then WiFi. See Section 2.2.
+**Failover**: `update()` checks the active transport; if disconnected, tries Ethernet first, then WiFi. See [Section 2.2](#22-transport-strategy-ethernet-primary-wifi-fallback).
 
-**NTP**: See Section 3.5.
+**NTP**: See [Section 3.5](#35-outbound-udp-ntp-time-sync).
 
 **Migrating HTTP clients**: `AzuraCastClient` and `FlowsheetClient` accept `NetworkManager&` instead of creating `WiFiSSLClient` directly:
 
@@ -2099,11 +2099,11 @@ classDiagram
 - **Ethernet**: Maintain WebSocket connection. `wsClient.poll()` (non-blocking) for commands. Heartbeats every 30s.
 - **WiFi**: Per-call HTTPS. POST heartbeat + GET commands every 60s.
 
-**Protocol**: See Section 3.6 (WebSocket), Section 3.7 (HTTP fallback), Section 3.8 (server endpoints).
+**Protocol**: See [Section 3.6](#36-websocket-management-channel) (WebSocket), [Section 3.7](#37-http-fallback-management-polling-wifi) (HTTP fallback), [Section 3.8](#38-server-side-endpoints) (server endpoints).
 
-**Message types**: See Section 3.6.2 and Section 5.2 (OpenAPI schemas).
+**Message types**: See [Section 3.6.2](#362-message-types) and [Section 5.2](#52-new-types-for-apiyaml) (OpenAPI schemas).
 
-**AzuraCast now-playing**: The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket over Ethernet and falls back to HTTP polling over WiFi. See Section 3.9. This is independent of the management server -- the now-playing feed and the management channel are separate WebSocket connections.
+**AzuraCast now-playing**: The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket over Ethernet and falls back to HTTP polling over WiFi. See [Section 3.9](#39-azuracast-centrifugo-direct-websocket). This is independent of the management server -- the now-playing feed and the management channel are separate WebSocket connections.
 
 **`loop()` integration**:
 
@@ -2171,7 +2171,7 @@ sequenceDiagram
 
 **Prerequisites**: Phase 1 (persistent storage for firmware version and boot state), Phase 3 (management channel for triggering update checks), and a CI pipeline that builds and publishes `.bin` artifacts on tagged releases.
 
-**Complexity note**: This phase is the most complex and is explicitly deferred. It requires understanding the Giga R1's bootloader and dual-bank flash layout, implementing a streaming HTTP download with QSPI flash write, SHA-256 verification, a watchdog timer, and CI changes. Hardware research (Open Question 7) must be completed before this phase can be scoped concretely.
+**Complexity note**: This phase is the most complex and is explicitly deferred. It requires understanding the Giga R1's bootloader and dual-bank flash layout, implementing a streaming HTTP download with QSPI flash write, SHA-256 verification, a watchdog timer, and CI changes. Hardware research ([Open Question 7](#8-open-questions)) must be completed before this phase can be scoped concretely.
 
 ### 7.7 Phase Summary
 
@@ -2259,7 +2259,7 @@ flowchart LR
 
 2. **Ethernet VLAN firewall rules:** Does the wired campus VLAN allow persistent outbound TCP on port 443? Does it have longer NAT idle timeouts than UNC-PSK WiFi? Affects WebSocket viability.
 
-3. **Server choice:** With WebSocket in the picture, Backend-Service (Express/Node.js) is a more natural fit than tubafrenzy (Java 8/Tomcat). Alternatively, a standalone lightweight service (Hono or Fastify on Railway) could host just the management endpoints. See Appendix A.
+3. **Server choice:** With WebSocket in the picture, Backend-Service (Express/Node.js) is a more natural fit than tubafrenzy (Java 8/Tomcat). Alternatively, a standalone lightweight service (Hono or Fastify on Railway) could host just the management endpoints. See [Appendix A](#appendix-a-server-choice-analysis).
 
 4. **Admin UI scope:** A full dashboard, or just an API that station managers can query via `curl` / a simple status page? Initial implementation should be minimal.
 
@@ -2275,17 +2275,17 @@ flowchart LR
 
 9. **Centrifugo channel name:** The channel format is `station:<shortcode>` where the shortcode is the station's URL-safe identifier in AzuraCast ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). For WXYC this is likely `station:main` or `station:wxyc` -- verify by inspecting the AzuraCast admin panel or the station's shortcode in the API response at `/api/stations`. **Partially resolved**: format confirmed, exact shortcode needs verification.
 
-10. ~~**Centrifugo authentication:**~~ **Resolved.** The now-playing WebSocket endpoint (`/api/live/nowplaying/websocket`) is public -- no authentication token is required ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). The Arduino subscribes by sending `{"subs": {"station:<shortcode>": {}}}` after connecting. This eliminates the need for the management server as a relay for the now-playing feed. See Section 3.9.
+10. ~~**Centrifugo authentication:**~~ **Resolved.** The now-playing WebSocket endpoint (`/api/live/nowplaying/websocket`) is public -- no authentication token is required ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). The Arduino subscribes by sending `{"subs": {"station:<shortcode>": {}}}` after connecting. This eliminates the need for the management server as a relay for the now-playing feed. See [Section 3.9](#39-azuracast-centrifugo-direct-websocket).
 
 11. **Centrifugo reconnection:** The Arduino must handle WebSocket reconnection itself (the `ArduinoWebsockets` library does not have built-in reconnection with backoff). Implement exponential backoff in the `AzuraCastClient` -- e.g., 1s, 2s, 4s, 8s, capped at 60s. During reconnection, fall back to HTTP polling. The `recover: true` subscription flag tells Centrifugo to replay missed messages on reconnect ([source](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)).
 
 12. **Backend-Service `show_id` tracking:** Does Backend-Service track the active show per DJ internally (so the Arduino doesn't need to pass `show_id` on every `POST /flowsheet` call), or does the Arduino need to include it? The current `api.yaml` schema for `FlowsheetCreateSongFreeform` does not include `show_id`, which suggests the server tracks it.
 
-13. ~~**Backend-Service `autoBreakpoint` equivalent**~~: **Resolved.** Backend-Service supports `entry_type: 'breakpoint'` (type code 8, "hour marker") but has no automatic insertion like tubafrenzy's `autoBreakpoint=true`. When targeting Backend-Service, the Arduino must explicitly POST a breakpoint entry at the top of each hour. Section 6.6 documents this.
+13. ~~**Backend-Service `autoBreakpoint` equivalent**~~: **Resolved.** Backend-Service supports `entry_type: 'breakpoint'` (type code 8, "hour marker") but has no automatic insertion like tubafrenzy's `autoBreakpoint=true`. When targeting Backend-Service, the Arduino must explicitly POST a breakpoint entry at the top of each hour. [Section 6.6](#66-show-lifecycle-differences) documents this.
 
 14. ~~**wxyc-shared entry point**~~: **Decided** -- new entry point `@wxyc/shared/auto-dj`. Keeps import footprint small for consumers that don't need Auto DJ types. Requires a new entry in `tsup.config.ts` and `package.json` exports.
 
-15. ~~**AsyncAPI**~~: **Decided** -- OpenAPI component schemas only. Protocol direction and lifecycle documented in prose with Mermaid sequence diagrams (Section 3.6). No AsyncAPI spec needed.
+15. ~~**AsyncAPI**~~: **Decided** -- OpenAPI component schemas only. Protocol direction and lifecycle documented in prose with Mermaid sequence diagrams ([Section 3.6](#36-websocket-management-channel)). No AsyncAPI spec needed.
 
 16. **`is_automation` flag in mobile apps:** The `is_automation` column on `DJ`/`NewDJ` in `api.yaml` will propagate to Swift (wxyc-ios-64) and Kotlin (WXYC-Android) via existing code generation. A follow-up PR to each mobile app is needed to handle this field (e.g., filtering Auto DJ from DJ lists). Track as a separate task.
 
@@ -2313,7 +2313,7 @@ AzuraCast embeds [Centrifugo](https://centrifugal.dev/) for real-time updates. I
 | **WebSocket** | `wss://<host>/api/live/nowplaying/websocket` | Bidirectional (subscribe + receive) |
 | **SSE** | `https://<host>/api/live/nowplaying/sse?cf_connect=<JSON>` | Server → client only |
 
-The Arduino uses the WebSocket endpoint (Section 3.9). SSE is not suitable for Arduino (no `EventSource` API).
+The Arduino uses the WebSocket endpoint ([Section 3.9](#39-azuracast-centrifugo-direct-websocket)). SSE is not suitable for Arduino (no `EventSource` API).
 
 ### Protocol Details
 
@@ -2327,18 +2327,18 @@ The `recover: true` flag enables Centrifugo's [history recovery](https://centrif
 
 **Initial data on connect**: Centrifugo sends cached publications immediately on subscription. The `connect` message includes the current now-playing state, so the Arduino has accurate data from the moment of connection -- no need to wait for the next track change or make a separate HTTP request ([source](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)).
 
-**Channel naming**: The channel format is `station:<shortcode>` where the shortcode is the station's URL-safe identifier in AzuraCast. For WXYC, this needs to be verified by inspecting the AzuraCast admin panel or querying `/api/stations` (see Open Question 9).
+**Channel naming**: The channel format is `station:<shortcode>` where the shortcode is the station's URL-safe identifier in AzuraCast. For WXYC, this needs to be verified by inspecting the AzuraCast admin panel or querying `/api/stations` (see [Open Question 9](#8-open-questions)).
 
 **Authentication**: The now-playing WebSocket endpoint is public. No JWT token, API key, or other authentication is required.
 
-**Centrifugo version note**: AzuraCast updated to Centrifugo v5 in early 2024, which changed the SSE/WebSocket message format. The current format sends initial cached publications in the `connect` response. Older AzuraCast installations may use a different format. The examples in this document and in Section 3.9 reflect the current (post-2024) format.
+**Centrifugo version note**: AzuraCast updated to Centrifugo v5 in early 2024, which changed the SSE/WebSocket message format. The current format sends initial cached publications in the `connect` response. Older AzuraCast installations may use a different format. The examples in this document and in [Section 3.9](#39-azuracast-centrifugo-direct-websocket) reflect the current (post-2024) format.
 
 ### Relay Alternative
 
-If the direct WebSocket connection (Section 3.9) proves impractical -- for example, if the Centrifugo payload exceeds ArduinoJson's memory budget, or if reconnection logic is too complex for the Arduino -- the management server can act as a relay:
+If the direct WebSocket connection ([Section 3.9](#39-azuracast-centrifugo-direct-websocket)) proves impractical -- for example, if the Centrifugo payload exceeds ArduinoJson's memory budget, or if reconnection logic is too complex for the Arduino -- the management server can act as a relay:
 
 1. Management server subscribes to `station:<shortcode>` using `centrifuge-js` (works in Node.js) or a [Go/Python Centrifugo client](https://centrifugal.dev/docs/transports/client_api).
 2. Management server extracts `sh_id`, `artist`, `title`, `album`, `is_live` from the full payload.
-3. Management server sends a flat `AutoDJNowPlaying` message (~200 bytes) to the Arduino over the management WebSocket (Section 3.6.2).
+3. Management server sends a flat `AutoDJNowPlaying` message (~200 bytes) to the Arduino over the management WebSocket ([Section 3.6.2](#362-message-types)).
 
 This adds a dependency on the management server (Phase 3) and an extra network hop, but guarantees a small, predictable payload for the Arduino to parse. The decision between direct and relay can be deferred until Phase 2 implementation, when the actual Centrifugo payload size from `remote.wxyc.org` can be measured.
