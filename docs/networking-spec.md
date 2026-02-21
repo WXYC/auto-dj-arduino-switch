@@ -152,15 +152,85 @@ See Section 6 for the full dual-backend client specification.
 
 ### 2.4 Management Server
 
-The management server provides:
+The management server is the remote administration layer for the Arduino. It provides device visibility (is the Arduino alive? what's it doing?), remote control (pause, resume, force-end show), and credential rotation -- without physical access to the studio.
 
-- A WebSocket endpoint for real-time bidirectional communication (Ethernet mode)
-- HTTP fallback endpoints for heartbeat and command polling (WiFi mode)
-- An admin API for viewing device status and issuing commands
+**Responsibilities**:
 
-Note: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The management server handles only device management (heartbeats, commands, status).
+| Responsibility | Description | Protocol reference |
+|----------------|-------------|-------------------|
+| **Heartbeat tracking** | Receive periodic heartbeats from the Arduino (every 30s over WebSocket, every 60s over HTTP). Maintain a `AutoDJDeviceStatus` record with last-seen timestamp, uptime, transport, error counts. Mark the device offline if no heartbeat arrives within 60s. | Section 3.6.2, 3.7 |
+| **Command dispatch** | Accept commands from the admin UI (`pause`, `resume`, `end_show`, `set_config`, `restart`, `ping`), enqueue them, and deliver them to the Arduino over WebSocket or HTTP poll. Track pending commands until acknowledged. | Section 3.6.3, 3.8 |
+| **Acknowledgment processing** | Receive acks from the Arduino confirming command execution. Dequeue the command, update status. Surface errors to the admin UI. | Section 3.6.2 |
+| **Error report relay** | Receive structured error reports from the Arduino and forward them to Sentry or another error tracking service. Alert on `fatal`-level errors. | Section 3.6.2 |
+| **Credential rotation** | Push new API keys or Backend-Service PATs to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | Section 4.6 |
+| **Admin API** | Expose device status and command endpoints to the admin UI, authenticated via Better Auth (session cookies or JWT, `stationManager` role). | Section 3.8, 4.5 |
+
+**What the management server does NOT do**: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9). The management server handles only device management -- it never touches flowsheet data or track metadata. (The relay architecture was considered and rejected; see Appendix B.)
+
+**Dual-transport interface**: The management server exposes the same logical operations over two transports to match the Arduino's network mode:
+
+| Transport | Arduino mode | Channel | Latency |
+|-----------|-------------|---------|---------|
+| **WebSocket** (`/api/auto-dj/ws`) | Ethernet (primary) | Persistent bidirectional connection | Real-time |
+| **HTTP** (`/api/auto-dj/heartbeat`, `/api/auto-dj/commands`) | WiFi (fallback) | Short polling every 60s | Up to 60s |
+
+The Arduino determines which transport to use based on `NetworkManager` state (Section 2.2). The management server accepts both simultaneously -- it does not need to know the Arduino's current transport mode.
+
+**Auth model**: Two audiences, two auth mechanisms (Sections 4.4, 4.5):
+
+- **Arduino-facing**: `X-Auto-DJ-Key` header (shared secret, timing-safe comparison)
+- **Admin-facing**: Better Auth session/JWT (`stationManager` role required)
 
 **Server choice**: Backend-Service (Express/Node.js) is a natural fit -- it already has WebSocket infrastructure via the `ws` package, uses Better Auth for admin authentication, and is the actively maintained backend. A standalone lightweight service (Hono or Fastify on Railway) is an alternative that keeps the management concern decoupled. See Appendix A for the full comparison.
+
+### 2.5 AzuraCast (Now-Playing Source)
+
+AzuraCast is the auto DJ and streaming software at `remote.wxyc.org`. From the Arduino's perspective, its sole role is to answer the question: *what song is playing right now?* The Arduino uses this to detect track changes and post entries to the flowsheet.
+
+AzuraCast exposes now-playing data through two interfaces. The Arduino uses both, switching based on network mode:
+
+| Interface | Protocol | Endpoint | Latency | Transport | Status |
+|-----------|----------|----------|---------|-----------|--------|
+| **Static HTTP** | HTTPS GET | `/api/nowplaying_static/main.json` | Up to 20s (poll interval) | Both (WiFi + Ethernet) | **Live** |
+| **Centrifugo WebSocket** | WSS | `/api/live/nowplaying/websocket` | Near-real-time (push) | Ethernet only | Planned |
+
+Both interfaces are **public** -- no authentication required. Both return the same logical data (`sh_id`, `artist`, `title`, `album`, `is_live`). The ArduinoJson filter document is identical for both. The `AzuraCastClient` consumes the same fields regardless of source.
+
+**Dual-mode strategy** (Section 3.9.2):
+
+- **Ethernet (push mode)**: Subscribe to Centrifugo WebSocket for near-real-time track change notifications. A 60-second safety-net HTTP poll catches any missed messages.
+- **WiFi (poll mode)**: Poll the static HTTP endpoint every 20 seconds. No persistent connections. This is the current production behavior.
+
+**What AzuraCast is NOT**: AzuraCast is an external system operated by WXYC's streaming infrastructure team, not something this project builds or deploys. The Arduino treats it as a read-only data source. AzuraCast has no knowledge of the Arduino, the flowsheet, or the management server. The now-playing feed is completely independent of the management channel (Section 2.4).
+
+See Section 3.2 for the HTTP polling protocol and Section 3.9 for the Centrifugo WebSocket protocol.
+
+### 2.6 Admin UI
+
+The admin UI is a web dashboard that gives station managers remote visibility into the Arduino's state and the ability to issue commands to it. It communicates exclusively with the management server (Section 2.4) -- it never talks to the Arduino directly.
+
+**Capabilities**:
+
+| Capability | Management server endpoint | Description |
+|------------|---------------------------|-------------|
+| **Device status** | `GET /api/auto-dj/status` | View current state: online/offline, active transport (Ethernet/WiFi), uptime, last heartbeat timestamp, current show state, error counts, last track posted |
+| **Issue commands** | `POST /api/auto-dj/commands` | Send commands: `pause`, `resume`, `end_show`, `restart`, `ping`, `set_config` |
+| **Command history** | (derived from status) | View pending commands and their ack status |
+| **Error visibility** | (derived from status) | View recent error reports relayed from the Arduino |
+
+**Auth**: Better Auth session cookies or JWT. Only users with the `stationManager` role (or a to-be-defined `admin` capability) can access these endpoints (Section 4.5).
+
+**Scope**: Open Question 4 asks whether the admin UI should be a full dashboard or a minimal status page. The initial implementation should be minimal -- the management server's REST API is the primary contract, and a simple UI can be layered on top.
+
+**Deployment**: Not yet decided. Options include:
+
+- A page within dj-site (already uses Better Auth, already deployed to Cloudflare Pages)
+- A standalone single-page app
+- A server-rendered page served by Backend-Service itself
+
+**Types consumed**: The admin UI imports `AutoDJDeviceStatus` and `AutoDJHeartbeat` from `wxyc-shared` (Section 5.5). These types are generated from `api.yaml`, so the UI gets compile-time type safety against the management server's responses.
+
+**Phase**: The admin UI is part of Phase 3 (Section 7.4), tracked as a 14-day task (`p3d`) that runs in parallel with the WebSocket management client work.
 
 ---
 
