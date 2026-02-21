@@ -9,6 +9,10 @@
  *
  * Hardware: Arduino Giga R1 WiFi
  * Wiring:   See docs/wiring.md
+ *
+ * Architecture: The loop() function is a thin orchestrator that performs I/O
+ * and delegates all transition/retry logic to the pure tick() function in
+ * state_machine.h. See test/test_state_machine.cpp for the full test suite.
  */
 
 #include "config.h"
@@ -18,31 +22,12 @@
 #include "azuracast_client.h"
 #include "flowsheet_client.h"
 #include "utils.h"
-
-// ========== State Machine ==========
-
-enum State {
-    BOOTING,
-    CONNECTING_WIFI,
-    IDLE,
-    STARTING_SHOW,
-    AUTO_DJ_ACTIVE,
-    ENDING_SHOW,
-    ERROR_STATE
-};
-
-const char* stateNames[] = {
-    "BOOTING", "CONNECTING_WIFI", "IDLE", "STARTING_SHOW",
-    "AUTO_DJ_ACTIVE", "ENDING_SHOW", "ERROR"
-};
+#include "state_machine.h"
 
 // ========== Global State ==========
 
-State currentState = BOOTING;
-int radioShowID = -1;
-unsigned long lastPollTime = 0;
+Context ctx = { BOOTING, -1, 0, 0 };
 unsigned long lastNtpSync = 0;
-int retryCount = 0;
 
 // ========== Modules ==========
 
@@ -51,15 +36,15 @@ WifiManager wifiManager(WIFI_SSID, WIFI_PASS, WIFI_RETRY_INTERVAL_MS);
 AzuraCastClient azuracast(AZURACAST_HOST, AZURACAST_PORT, AZURACAST_PATH);
 FlowsheetClient flowsheet(TUBAFRENZY_HOST, TUBAFRENZY_PORT, AUTO_DJ_API_KEY);
 
-// ========== State Transitions ==========
+// ========== Logging ==========
 
-void transitionTo(State newState) {
-    Serial.print("[State] ");
-    Serial.print(stateNames[currentState]);
-    Serial.print(" -> ");
-    Serial.println(stateNames[newState]);
-    currentState = newState;
-    retryCount = 0;
+void logTransition(State prev, State next) {
+    if (prev != next) {
+        Serial.print("[State] ");
+        Serial.print(stateName(prev));
+        Serial.print(" -> ");
+        Serial.println(stateName(next));
+    }
 }
 
 // ========== Setup ==========
@@ -73,14 +58,20 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     relayMonitor.setUp();
 
-    transitionTo(CONNECTING_WIFI);
+    ctx.state = CONNECTING_WIFI;
+    ctx.retryCount = 0;
+    Serial.print("[State] BOOTING -> CONNECTING_WIFI");
+    Serial.println();
+
     wifiManager.setUp();
 
     if (wifiManager.isConnected()) {
         lastNtpSync = millis();
         Serial.print("[Time] Epoch: ");
         Serial.println(wifiManager.getEpochTime());
-        transitionTo(IDLE);
+        ctx.state = IDLE;
+        ctx.retryCount = 0;
+        Serial.println("[State] CONNECTING_WIFI -> IDLE");
     }
 }
 
@@ -101,122 +92,60 @@ void loop() {
         Serial.println(wifiManager.getEpochTime());
     }
 
-    // WiFi loss handling: if we lose WiFi in any state, go to CONNECTING_WIFI
-    // but preserve radioShowID so we can resume after reconnection.
-    if (currentState != BOOTING && currentState != CONNECTING_WIFI && !wifiManager.isConnected()) {
-        Serial.println("[State] WiFi lost, transitioning to CONNECTING_WIFI.");
-        currentState = CONNECTING_WIFI;
-        return;
+    // ---- GATHER INPUTS ----
+    Inputs inputs;
+    inputs.relayStateChanged = relayMonitor.stateChanged();
+    inputs.autoDJActive = relayMonitor.isAutoDJActive();
+    inputs.wifiConnected = wifiManager.isConnected();
+    inputs.epochTime = wifiManager.getEpochTime();
+    inputs.currentMillis = millis();
+    inputs.pollIntervalMs = POLL_INTERVAL_MS;
+    inputs.maxRetries = MAX_RETRIES;
+    inputs.retryBackoffMs = RETRY_BACKOFF_MS;
+
+    // Default I/O results
+    inputs.startShowResult = -1;
+    inputs.endShowResult = false;
+    inputs.pollNewTrack = false;
+    inputs.pollLiveDJ = false;
+
+    // ---- PRE-TICK I/O ----
+    switch (ctx.state) {
+        case STARTING_SHOW: {
+            unsigned long hourMs = currentHourMs(inputs.epochTime);
+            if (hourMs > 0) {
+                inputs.startShowResult = flowsheet.startShow(hourMs);
+            }
+            break;
+        }
+        case AUTO_DJ_ACTIVE:
+            if (inputs.currentMillis - ctx.lastPollTime >= POLL_INTERVAL_MS) {
+                inputs.pollNewTrack = azuracast.poll();
+                inputs.pollLiveDJ = azuracast.isLiveDJ();
+                inputs.artist = azuracast.getArtist();
+                inputs.title = azuracast.getTitle();
+                inputs.album = azuracast.getAlbum();
+            }
+            break;
+        case ENDING_SHOW:
+            inputs.endShowResult = flowsheet.endShow(ctx.radioShowID);
+            break;
+        default:
+            break;
     }
 
-    switch (currentState) {
-        case BOOTING:
-            // Should not stay here -- setup() transitions out
-            break;
+    // ---- TICK ----
+    State prevState = ctx.state;
+    TickResult result = tick(ctx, inputs);
+    ctx = result.context;
+    logTransition(prevState, ctx.state);
 
-        case CONNECTING_WIFI:
-            if (wifiManager.isConnected()) {
-                // If we had an active show before WiFi dropped, resume it
-                if (radioShowID > 0) {
-                    Serial.println("[State] WiFi restored, resuming active show.");
-                    transitionTo(AUTO_DJ_ACTIVE);
-                } else {
-                    transitionTo(IDLE);
-                }
-            }
-            break;
-
-        case IDLE:
-            if (relayMonitor.stateChanged() && relayMonitor.isAutoDJActive()) {
-                transitionTo(STARTING_SHOW);
-            }
-            break;
-
-        case STARTING_SHOW: {
-            unsigned long hourMs = currentHourMs(wifiManager.getEpochTime());
-            if (hourMs == 0) {
-                Serial.println("[Error] No NTP time available, cannot start show.");
-                transitionTo(ERROR_STATE);
-                break;
-            }
-
-            int showID = flowsheet.startShow(hourMs);
-            if (showID > 0) {
-                radioShowID = showID;
-                lastPollTime = 0; // Force immediate first poll
-                transitionTo(AUTO_DJ_ACTIVE);
-            } else {
-                retryCount++;
-                if (retryCount >= MAX_RETRIES) {
-                    Serial.println("[Error] Failed to start show after max retries.");
-                    transitionTo(ERROR_STATE);
-                } else {
-                    Serial.print("[Retry] Start show attempt ");
-                    Serial.print(retryCount);
-                    Serial.print("/");
-                    Serial.println(MAX_RETRIES);
-                    delay(RETRY_BACKOFF_MS * retryCount);
-                }
-            }
-            break;
-        }
-
-        case AUTO_DJ_ACTIVE:
-            // Check if DJ has taken over
-            if (relayMonitor.stateChanged() && !relayMonitor.isAutoDJActive()) {
-                transitionTo(ENDING_SHOW);
-                break;
-            }
-
-            // Poll AzuraCast on interval
-            if (millis() - lastPollTime >= POLL_INTERVAL_MS) {
-                lastPollTime = millis();
-
-                bool newTrack = azuracast.poll();
-
-                // If a live DJ is streaming to AzuraCast, skip flowsheet entries
-                // (the relay is the primary source of truth, but this is a safety check)
-                if (newTrack && !azuracast.isLiveDJ()) {
-                    unsigned long hourMs = currentHourMs(wifiManager.getEpochTime());
-                    if (hourMs > 0) {
-                        flowsheet.addEntry(radioShowID, hourMs,
-                            azuracast.getArtist(),
-                            azuracast.getTitle(),
-                            azuracast.getAlbum());
-                    }
-                }
-            }
-            break;
-
-        case ENDING_SHOW: {
-            bool ended = flowsheet.endShow(radioShowID);
-            if (ended) {
-                radioShowID = -1;
-                transitionTo(IDLE);
-            } else {
-                retryCount++;
-                if (retryCount >= MAX_RETRIES) {
-                    Serial.println("[Warning] Failed to end show after max retries. Returning to IDLE.");
-                    radioShowID = -1;
-                    transitionTo(IDLE);
-                } else {
-                    delay(RETRY_BACKOFF_MS * retryCount);
-                }
-            }
-            break;
-        }
-
-        case ERROR_STATE:
-            // Wait and retry -- check if conditions have improved
-            if (!wifiManager.isConnected()) {
-                transitionTo(CONNECTING_WIFI);
-            } else if (relayMonitor.isAutoDJActive() && radioShowID <= 0) {
-                // Retry starting the show
-                transitionTo(STARTING_SHOW);
-            } else if (!relayMonitor.isAutoDJActive()) {
-                transitionTo(IDLE);
-            }
-            delay(RETRY_BACKOFF_MS);
-            break;
+    // ---- POST-TICK I/O ----
+    if (result.addEntry) {
+        flowsheet.addEntry(ctx.radioShowID, result.addEntryHourMs,
+            result.addEntryArtist, result.addEntryTitle, result.addEntryAlbum);
+    }
+    if (result.delayMs > 0) {
+        delay(result.delayMs);
     }
 }
