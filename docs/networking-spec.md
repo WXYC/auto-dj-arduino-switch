@@ -1509,6 +1509,71 @@ The `FlowsheetBackend` interface normalizes these differences:
 - **`addBreakpoint()`** is a no-op in `TubafrenzyBackend` (the server handles it via `autoBreakpoint=true`). In `BackendServiceBackend`, it POSTs the breakpoint entry explicitly.
 - The Arduino's `loop()` tracks hour boundaries and calls `addBreakpoint()` when the hour changes. This is harmless for tubafrenzy (no-op) and necessary for Backend-Service.
 
+### 6.7 Testing Strategy
+
+Testing networking code requires injecting fake network responses without real connections. The same `Client&` dependency injection that enables the `NetworkManager` abstraction (Section 7.3) also enables desktop testing with pre-loaded HTTP responses.
+
+#### Arduino-side: FakeClient pattern
+
+The [Phase B.1 DI refactor](https://github.com/WXYC/auto-dj-arduino-switch) introduces a `FakeClient` -- a concrete `Client` subclass that stores a pre-loaded HTTP response buffer and captures all written bytes (the request) for assertion. The real `ArduinoHttpClient` and `ArduinoJson` libraries compile on desktop against a minimal Arduino shim and parse `FakeClient` responses identically to real network responses.
+
+Each protocol in Section 3 maps to specific `FakeClient` test fixtures:
+
+| Protocol (Section) | FakeClient Response | Key Assertions |
+|--------------------|--------------------|----------------|
+| AzuraCast polling (3.2) | 200 + JSON body with `sh_id`, `song.*`, `live.is_live` | Track change detection, field parsing, `isLiveDJ()` |
+| tubafrenzy start show (3.3.1) | 302 + `Location: .../radioShowID=12345` | `radioShowID` extraction from Location header |
+| tubafrenzy add entry (3.3.2) | 302 | Request body contains `autoBreakpoint=true`, URL-encoded fields, `X-Auto-DJ-Key` header |
+| tubafrenzy end show (3.3.3) | 302 | Request body contains `mode=signoffConfirm` |
+| Backend-Service join (3.4.1) | 200 + JSON `{"id": 789, ...}` | `Show.id` extraction from JSON body |
+| Backend-Service add entry (3.4.2) | 200 + JSON | Request body is valid `FlowsheetCreateSongFreeform` JSON, `Authorization: Bearer` header |
+| Backend-Service end show (3.4.3) | 200 + JSON | Request body contains `dj_id` |
+| Backend-Service breakpoint (3.4.4) | 200 + JSON | Request body is `{"message": "BREAKPOINT"}` |
+| Mgmt server heartbeat fallback (3.7) | 200 OK | Request body matches `AutoDJHeartbeat` schema |
+| Mgmt server command poll (3.7) | 200 + JSON array of commands | Command parsing, ack generation |
+
+The `FakeClient` infrastructure is built once and reused across all Arduino networking tests. Error cases (HTTP 500, malformed JSON, missing fields, timeouts) are tested by loading the appropriate bad response into `FakeClient`.
+
+The `FlowsheetBackend` interface (Section 6.5) enables a second layer of testing: the state machine can be tested against a mock `FlowsheetBackend` without any HTTP parsing at all. This complements the `FakeClient` tests, which verify the HTTP layer in isolation.
+
+#### Server-side: request/response testing
+
+The management server and Backend-Service endpoints need their own tests, using their native frameworks:
+
+| Component | Framework | What to Test |
+|-----------|-----------|-------------|
+| **Management server** (TypeScript) | Jest or Vitest | WebSocket message parsing (heartbeat, ack, error), command serialization, Centrifugo relay transform, device status aggregation |
+| **Backend-Service** (TypeScript) | Jest | Flowsheet endpoints accept Auto DJ service account (Bearer PAT), `is_automation` DJ filtering, breakpoint entry creation |
+| **tubafrenzy** (Java) | JUnit (existing) | `isAutoDJRequest()` already tested; no new server-side tests needed for the Arduino client refactoring |
+
+Server-side tests inject fake HTTP *requests* (not responses) and assert the server's behavior. For the management server WebSocket tests, a test client connects to the server and sends/receives JSON messages, asserting against the schemas in Section 5.2.
+
+#### The contract: wxyc-shared as the shared test fixture
+
+The `api.yaml` schemas (Section 5.2) serve as the contract between Arduino and server. Both sides test against the same type definitions, but from opposite directions:
+
+```
+Arduino (C++)                    wxyc-shared (api.yaml)              Server (TypeScript)
+─────────────                    ──────────────────────              ───────────────────
+FakeClient loaded with           ◄── Schema defines ──►             Test client sends
+canonical JSON response          response shape                     canonical JSON to server
+
+Assert: parsed fields            AutoDJHeartbeat                    Assert: server accepts
+match expected values            AutoDJCommand                      and correctly processes
+                                 AutoDJAck                          the message
+Assert: sent request body        AutoDJNowPlaying
+matches schema                   AutoDJErrorReport                  Assert: server sends
+                                                                    valid schema to client
+```
+
+When a schema changes in `api.yaml`:
+
+1. **TypeScript consumers** get compile errors from generated types (automatic)
+2. **Arduino code** must be manually updated (see Section 5.4 contract table)
+3. **Test fixtures** on both sides must be updated to match the new schema
+
+The `FakeClient` response fixtures should be maintained as canonical test data files (not inline strings) so they can be cross-referenced against the `api.yaml` schemas during code review.
+
 ---
 
 ## 7. Implementation Roadmap
