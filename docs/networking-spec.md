@@ -140,9 +140,9 @@ The Arduino supports both tubafrenzy and Backend-Service as flowsheet targets. A
 |--|-----------|----------------|
 | **Content type** | `application/x-www-form-urlencoded` | `application/json` |
 | **Auth** | `X-Auto-DJ-Key` header | `Authorization: Bearer <PAT>` |
-| **Start show** | POST `/playlists/startRadioShow` -> 302, `radioShowID` from Location header | POST `/flowsheet/join` -> 200 JSON, `Show.id` from response body |
-| **Add entry** | POST `/playlists/flowsheetEntryAdd` -> 302 | POST `/flowsheet` -> 200 JSON |
-| **End show** | POST `/playlists/finishRadioShow` -> 302 | POST `/flowsheet/end` -> 200 JSON |
+| **Start show** | POST `/playlists/startRadioShow` → 302, `radioShowID` from Location header | POST `/flowsheet/join` → 200 JSON, `Show.id` from response body |
+| **Add entry** | POST `/playlists/flowsheetEntryAdd` → 302 | POST `/flowsheet` → 200 JSON |
+| **End show** | POST `/playlists/finishRadioShow` → 302 | POST `/flowsheet/end` → 200 JSON |
 | **Breakpoints** | Server auto-inserts via `autoBreakpoint=true` | Client must POST explicit breakpoint entry |
 | **DJ ID** | `"0"` (string, no DJ table) | Auto-incremented integer from DJ table |
 
@@ -170,21 +170,21 @@ Note: The now-playing feed does **not** flow through the management server. The 
 
 | # | Direction | Protocol | Endpoint / Channel | Auth | Content Type | Transport | Status |
 |---|-----------|----------|-------------------|------|-------------|-----------|--------|
-| 1 | Arduino -> AzuraCast | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Live** |
-| 2 | Arduino -> tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
-| 3 | Arduino -> tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
-| 4 | Arduino -> tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
-| 5 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer token | JSON | Both | Planned |
-| 6 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet` | Bearer token | JSON | Both | Planned |
-| 7 | Arduino -> Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer token | JSON | Both | Planned |
-| 8 | Arduino <-> AzuraCast | WSS | `/api/live/nowplaying/websocket` | None (public) | JSON frames | Ethernet | Planned |
-| 9 | Arduino -> NTP | UDP | `pool.ntp.org:123` | None | NTP packet | Ethernet | Planned |
-| 10 | Arduino <-> Mgmt Server | WSS | `/api/auto-dj/ws` | `X-Auto-DJ-Key` | JSON frames | Ethernet | Planned |
-| 11 | Arduino -> Mgmt Server | HTTPS POST | `/api/auto-dj/heartbeat` | `X-Auto-DJ-Key` | JSON | WiFi (fallback) | Planned |
-| 12 | Arduino -> Mgmt Server | HTTPS GET | `/api/auto-dj/commands` | `X-Auto-DJ-Key` | JSON response | WiFi (fallback) | Planned |
-| 13 | Admin UI -> Mgmt Server | HTTPS POST | `/api/auto-dj/commands` | Better Auth session | JSON | N/A | Planned |
-| 14 | Admin UI -> Mgmt Server | HTTPS GET | `/api/auto-dj/status` | Better Auth session | JSON response | N/A | Planned |
-| 15 | Arduino -> NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Live** |
+| 1 | Arduino → AzuraCast | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Live** |
+| 2 | Arduino → tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
+| 3 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
+| 4 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
+| 5 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer token | JSON | Both | Planned |
+| 6 | Arduino → Backend-Service | HTTPS POST | `/flowsheet` | Bearer token | JSON | Both | Planned |
+| 7 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer token | JSON | Both | Planned |
+| 8 | Arduino ↔︎ AzuraCast | WSS | `/api/live/nowplaying/websocket` | None (public) | JSON frames | Ethernet | Planned |
+| 9 | Arduino → NTP | UDP | `pool.ntp.org:123` | None | NTP packet | Ethernet | Planned |
+| 10 | Arduino ↔︎ Mgmt Server | WSS | `/api/auto-dj/ws` | `X-Auto-DJ-Key` | JSON frames | Ethernet | Planned |
+| 11 | Arduino → Mgmt Server | HTTPS POST | `/api/auto-dj/heartbeat` | `X-Auto-DJ-Key` | JSON | WiFi (fallback) | Planned |
+| 12 | Arduino → Mgmt Server | HTTPS GET | `/api/auto-dj/commands` | `X-Auto-DJ-Key` | JSON response | WiFi (fallback) | Planned |
+| 13 | Admin UI → Mgmt Server | HTTPS POST | `/api/auto-dj/commands` | Better Auth session | JSON | N/A | Planned |
+| 14 | Admin UI → Mgmt Server | HTTPS GET | `/api/auto-dj/status` | Better Auth session | JSON response | N/A | Planned |
+| 15 | Arduino → NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Live** |
 
 ### 3.2 Outbound HTTP: AzuraCast Now Playing
 
@@ -480,7 +480,7 @@ sequenceDiagram
 
 All WebSocket messages are JSON objects with a `type` discriminator field.
 
-**Heartbeat** (Arduino -> Server):
+**Heartbeat** (Arduino → Server):
 
 ```json
 {
@@ -529,7 +529,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `tracks_posted` | `integer` | Total entries successfully posted to the flowsheet since boot |
 | `errors_since_boot` | `integer` | Total errors since boot |
 
-**Command** (Server -> Arduino):
+**Command** (Server → Arduino):
 
 ```json
 {
@@ -549,7 +549,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `key` | `string \| undefined` | Config key (only for `set_config`) |
 | `value` | `string \| undefined` | Config value (only for `set_config`) |
 
-**Acknowledgment** (Arduino -> Server):
+**Acknowledgment** (Arduino → Server):
 
 ```json
 {
@@ -566,7 +566,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `status` | `string` | One of: `ok`, `error`, `unknown_command` |
 | `error` | `string \| undefined` | Error message (only when `status` is `"error"`) |
 
-**Now Playing Relay** (Server -> Arduino):
+**Now Playing Relay** (Server → Arduino):
 
 ```json
 {
@@ -590,7 +590,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 
 This is a flat structure designed for efficient ArduinoJson parsing. If the relay architecture is used (Appendix B), the management server extracts these fields from AzuraCast's Centrifugo feed and sends this simplified format. If the Arduino subscribes directly to Centrifugo (Section 3.9, recommended), this message type is not used -- the Arduino parses the Centrifugo payload itself.
 
-**Error Report** (Arduino -> Server):
+**Error Report** (Arduino → Server):
 
 ```json
 {
@@ -655,7 +655,7 @@ NAT gateways and campus firewalls kill idle TCP connections, typically after 60-
 
 When the Arduino is on WiFi (no persistent connections), the management channel degrades to HTTP short polling on a 60-second interval.
 
-**Heartbeat** (Arduino -> Server):
+**Heartbeat** (Arduino → Server):
 
 | Field | Value |
 |-------|-------|
@@ -666,7 +666,7 @@ When the Arduino is on WiFi (no persistent connections), the management channel 
 | **Body** | Same JSON as the WebSocket heartbeat message (Section 3.6.2) |
 | **Response** | 200 OK |
 
-**Command poll** (Arduino -> Server):
+**Command poll** (Arduino → Server):
 
 | Field | Value |
 |-------|-------|
@@ -778,7 +778,7 @@ Direct subscription is simpler:
 | | Direct (recommended) | Relay via management server |
 |--|---------------------|---------------------------|
 | **Dependencies** | Arduino + AzuraCast only | Arduino + management server + AzuraCast |
-| **Latency** | Single hop | Two hops (Centrifugo -> server -> Arduino) |
+| **Latency** | Single hop | Two hops (Centrifugo → server → Arduino) |
 | **Failure modes** | AzuraCast down | AzuraCast down OR management server down |
 | **Phase dependency** | Phase 2 (Ethernet) | Phase 3 (management server) |
 | **Arduino complexity** | WebSocket client + JSON parsing | Same (receives JSON either way) |
@@ -984,8 +984,8 @@ This ensures that a bad credential push doesn't permanently brick the WiFi fallb
 
 The `api.yaml` file in `wxyc-shared` is the single source of truth for API types. Code generation produces:
 
-- **TypeScript** (`openapi-generator-cli` -> `src/generated/models/`): consumed by Backend-Service, dj-site, management server, admin UI
-- **Python** (`datamodel-codegen` -> Pydantic v2): consumed by request-o-matic, library-metadata-lookup
+- **TypeScript** (`openapi-generator-cli` → `src/generated/models/`): consumed by Backend-Service, dj-site, management server, admin UI
+- **Python** (`datamodel-codegen` → Pydantic v2): consumed by request-o-matic, library-metadata-lookup
 - **Swift**: consumed by wxyc-ios-64 (via existing code generation pipeline)
 - **Kotlin**: consumed by WXYC-Android (via existing code generation pipeline)
 
@@ -1449,17 +1449,17 @@ Implemented in `flowsheet_client.cpp` and `flowsheet_client.h`. See Section 3.3 
 
 Three operations:
 
-1. **`startShow(startingHourMs)`** -> `int radioShowID`
+1. **`startShow(startingHourMs)`** → `int radioShowID`
    - POST form-encoded body to `/playlists/startRadioShow`
    - Parse `radioShowID` from 302 Location header
    - Return -1 on failure
 
-2. **`addEntry(radioShowID, workingHourMs, artist, title, album)`** -> `bool`
+2. **`addEntry(radioShowID, workingHourMs, artist, title, album)`** → `bool`
    - POST form-encoded body to `/playlists/flowsheetEntryAdd`
    - Includes `autoBreakpoint=true` (server handles hourly breakpoints)
    - Return true on 302
 
-3. **`endShow(radioShowID)`** -> `bool`
+3. **`endShow(radioShowID)`** → `bool`
    - POST form-encoded body to `/playlists/finishRadioShow`
    - Includes `mode=signoffConfirm`
    - Return true on 302
@@ -1470,20 +1470,20 @@ To be implemented in `backend_service_client.cpp` and `backend_service_client.h`
 
 Three operations (plus breakpoints):
 
-1. **`startShow(showName)`** -> `int showId`
+1. **`startShow(showName)`** → `int showId`
    - POST JSON to `/flowsheet/join`
    - Parse `id` from 200 JSON response body
    - Return -1 on failure
 
-2. **`addEntry(artist, title, album)`** -> `bool`
+2. **`addEntry(artist, title, album)`** → `bool`
    - POST JSON to `/flowsheet`
    - Return true on 200
 
-3. **`endShow()`** -> `bool`
+3. **`endShow()`** → `bool`
    - POST JSON to `/flowsheet/end`
    - Return true on 200
 
-4. **`addBreakpoint()`** -> `bool`
+4. **`addBreakpoint()`** → `bool`
    - POST JSON to `/flowsheet` with `{ "message": "BREAKPOINT" }`
    - Return true on 200
 
@@ -1617,11 +1617,11 @@ The `ManagementClient` module (Section 7.4) serializes heartbeats, acks, and err
 
 | Direction | Message Type | Test Focus |
 |-----------|-------------|------------|
-| Arduino -> Server | `AutoDJHeartbeat` | All fields populated correctly; telemetry counters increment; `config_hash` matches active config; `last_track` is null when no track has been posted |
-| Arduino -> Server | `AutoDJAck` | `id` matches the command `id`; `status` reflects actual outcome (`ok`, `error`, `unknown_command`); `error` field populated on failure |
-| Arduino -> Server | `AutoDJErrorReport` | `level`/`code`/`module` populated correctly; `count` accumulates repeat errors; `free_ram` matches actual heap query |
-| Server -> Arduino | `AutoDJCommand` | Unknown `action` values produce `unknown_command` ack; `set_config` writes to KVStore (mock); `pause`/`resume` update state machine; `restart` triggers reset; string length limits enforced |
-| Server -> Arduino | `AutoDJNowPlaying` | `sh_id` change detection (same logic as AzuraCast polling); fields populate the track data used by flowsheet posting; `is_live` flag is surfaced |
+| Arduino → Server | `AutoDJHeartbeat` | All fields populated correctly; telemetry counters increment; `config_hash` matches active config; `last_track` is null when no track has been posted |
+| Arduino → Server | `AutoDJAck` | `id` matches the command `id`; `status` reflects actual outcome (`ok`, `error`, `unknown_command`); `error` field populated on failure |
+| Arduino → Server | `AutoDJErrorReport` | `level`/`code`/`module` populated correctly; `count` accumulates repeat errors; `free_ram` matches actual heap query |
+| Server → Arduino | `AutoDJCommand` | Unknown `action` values produce `unknown_command` ack; `set_config` writes to KVStore (mock); `pause`/`resume` update state machine; `restart` triggers reset; string length limits enforced |
+| Server → Arduino | `AutoDJNowPlaying` | `sh_id` change detection (same logic as AzuraCast polling); fields populate the track data used by flowsheet posting; `is_live` flag is surfaced |
 
 Error cases: malformed JSON frames, missing required fields, oversized messages (ArduinoJson memory limits), and connection drops mid-frame.
 
@@ -1648,12 +1648,12 @@ The management server's WebSocket handling needs dedicated tests that exercise t
 
 | Scenario | Test Focus |
 |----------|-----------|
-| **Heartbeat ingestion** | Server receives `AutoDJHeartbeat` JSON -> updates `AutoDJDeviceStatus` -> last heartbeat timestamp updates -> admin API reflects new status |
-| **Command delivery** | Admin POSTs `{"action": "pause"}` -> server enqueues `AutoDJCommand` with unique `id` -> command appears on WebSocket as valid `AutoDJCommand` JSON -> `pending_commands` count increments |
-| **Ack processing** | Server receives `AutoDJAck` with matching `id` -> command dequeued -> `pending_commands` decrements -> ack with `status: "error"` triggers alert/log |
-| **Error report relay** | Server receives `AutoDJErrorReport` -> relayed to Sentry (mock) -> `level: "fatal"` triggers alert |
-| **Connection lifecycle** | WebSocket upgrade with valid `X-Auto-DJ-Key` -> accepted; invalid key -> 401; connection drop -> device status changes to `connected: false`; reconnect -> status restores |
-| **Stale heartbeat detection** | No heartbeat for >60s -> device marked offline; heartbeat resumes -> device marked online |
+| **Heartbeat ingestion** | Server receives `AutoDJHeartbeat` JSON → updates `AutoDJDeviceStatus` → last heartbeat timestamp updates → admin API reflects new status |
+| **Command delivery** | Admin POSTs `{"action": "pause"}` → server enqueues `AutoDJCommand` with unique `id` → command appears on WebSocket as valid `AutoDJCommand` JSON → `pending_commands` count increments |
+| **Ack processing** | Server receives `AutoDJAck` with matching `id` → command dequeued → `pending_commands` decrements → ack with `status: "error"` triggers alert/log |
+| **Error report relay** | Server receives `AutoDJErrorReport` → relayed to Sentry (mock) → `level: "fatal"` triggers alert |
+| **Connection lifecycle** | WebSocket upgrade with valid `X-Auto-DJ-Key` → accepted; invalid key → 401; connection drop → device status changes to `connected: false`; reconnect → status restores |
+| **Stale heartbeat detection** | No heartbeat for >60s → device marked offline; heartbeat resumes → device marked online |
 
 **AzuraCast Centrifugo WebSocket parsing** (Arduino-side, GoogleTest):
 
@@ -1661,12 +1661,12 @@ The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket (Section 3.9
 
 | Scenario | Test Focus |
 |----------|-----------|
-| **Initial connect** | Parse `connect.subs.station:*.publications[0].data.np` -> extract `sh_id`, `artist`, `title`, `album`, `is_live` |
-| **Subsequent update** | Parse `pub.data.np` -> same field extraction |
-| **Track change detection** | Two messages with different `sh_id` values -> both trigger new track; same `sh_id` -> no trigger |
-| **Missing fields** | `null` song fields -> graceful handling (empty strings or skip) |
-| **Live DJ flag** | `live.is_live: true` -> `isLiveDJ()` true |
-| **Oversized payload** | Centrifugo response exceeding ArduinoJson memory budget -> graceful failure, fall back to HTTP poll |
+| **Initial connect** | Parse `connect.subs.station:*.publications[0].data.np` → extract `sh_id`, `artist`, `title`, `album`, `is_live` |
+| **Subsequent update** | Parse `pub.data.np` → same field extraction |
+| **Track change detection** | Two messages with different `sh_id` values → both trigger new track; same `sh_id` → no trigger |
+| **Missing fields** | `null` song fields → graceful handling (empty strings or skip) |
+| **Live DJ flag** | `live.is_live: true` → `isLiveDJ()` true |
+| **Oversized payload** | Centrifugo response exceeding ArduinoJson memory budget → graceful failure, fall back to HTTP poll |
 
 **Centrifugo relay transform** (management server, Jest or Vitest -- only if relay architecture is used, see Appendix B):
 
@@ -1674,9 +1674,9 @@ If the direct WebSocket proves impractical and the management server relays now-
 
 | Scenario | Test Focus |
 |----------|-----------|
-| **Normal transform** | Full AzuraCast now-playing JSON (fixture) -> extract `sh_id`, `artist`, `title`, `album`, `is_live` -> output matches `AutoDJNowPlaying` schema |
-| **Missing fields** | AzuraCast JSON with `null` song fields -> graceful handling |
-| **Relay to Arduino** | Transformed message sent on WebSocket -> Arduino's `FakeWebSocket` receives valid `AutoDJNowPlaying` |
+| **Normal transform** | Full AzuraCast now-playing JSON (fixture) → extract `sh_id`, `artist`, `title`, `album`, `is_live` → output matches `AutoDJNowPlaying` schema |
+| **Missing fields** | AzuraCast JSON with `null` song fields → graceful handling |
+| **Relay to Arduino** | Transformed message sent on WebSocket → Arduino's `FakeWebSocket` receives valid `AutoDJNowPlaying` |
 
 #### Shared test fixtures: wxyc-shared as the contract
 
@@ -1919,7 +1919,7 @@ The per-call client creation pattern is preserved. Over Ethernet this is unneces
 | `auto-dj-arduino-switch.ino` | Replace `WifiManager` with `NetworkManager` |
 | `config.h` | Add `ETHERNET_CS_PIN`, `ETHERNET_MAC` defaults |
 
-### 7.4 Phase 3: WebSocket Management + AzuraCast Relay
+### 7.4 Phase 3: WebSocket Management + AzuraCast Direct WebSocket
 
 **Depends on Phases 1 + 2.** Adds real-time remote visibility and control.
 
@@ -2042,6 +2042,7 @@ gantt
     NetworkManager + failover              :p2c, after p2b, 14d
     NTP over Ethernet                      :p2d, after p2c, 7d
     Migrate HTTP clients                   :p2e, after p2c, 7d
+    AzuraCast direct WebSocket             :p2f, after p2e, 7d
 
     section wxyc-shared + Backend-Service
     Auto DJ schemas in api.yaml            :ws1, after p2e, 7d
@@ -2058,7 +2059,6 @@ gantt
     HTTP short-poll fallback               :p3c, after p3b, 7d
     Admin UI / dashboard                   :p3d, after p3a, 14d
     Pause/resume + force end show          :p3e, after p3c, 7d
-    AzuraCast direct WebSocket             :p2f, after p2e, 7d
 
     section Phase 4
     Credential rotation protocol           :p4a, after p3e, 14d
@@ -2156,7 +2156,7 @@ AzuraCast embeds [Centrifugo](https://centrifugal.dev/) for real-time updates. I
 | Protocol | Endpoint | Direction |
 |----------|---------|-----------|
 | **WebSocket** | `wss://<host>/api/live/nowplaying/websocket` | Bidirectional (subscribe + receive) |
-| **SSE** | `https://<host>/api/live/nowplaying/sse?cf_connect=<JSON>` | Server -> client only |
+| **SSE** | `https://<host>/api/live/nowplaying/sse?cf_connect=<JSON>` | Server → client only |
 
 The Arduino uses the WebSocket endpoint (Section 3.9). SSE is not suitable for Arduino (no `EventSource` API).
 
