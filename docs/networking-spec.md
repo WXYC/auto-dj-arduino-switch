@@ -396,6 +396,50 @@ Unlike tubafrenzy (which auto-inserts breakpoints via `autoBreakpoint=true`), Ba
 }
 ```
 
+#### 3.4.5 Show Lifecycle Comparison
+
+The full show lifecycle for both backends, showing the key protocol differences:
+
+```mermaid
+sequenceDiagram
+    participant Arduino
+    participant TF as tubafrenzy
+    participant BS as Backend-Service
+
+    rect rgb(200, 220, 240)
+    Note over Arduino,TF: tubafrenzy path (live)
+    Arduino->>TF: POST /playlists/startRadioShow<br/>(form-encoded, X-Auto-DJ-Key)
+    TF-->>Arduino: 302 Location: ...radioShowID=12345
+
+    loop Each track change
+        Arduino->>TF: POST /playlists/flowsheetEntryAdd<br/>(autoBreakpoint=true)
+        TF-->>Arduino: 302
+    end
+
+    Arduino->>TF: POST /playlists/finishRadioShow
+    TF-->>Arduino: 302
+    end
+
+    rect rgb(220, 240, 200)
+    Note over Arduino,BS: Backend-Service path (planned)
+    Arduino->>BS: POST /flowsheet/join<br/>(JSON, Bearer token)
+    BS-->>Arduino: 200 {"id": 789, ...}
+
+    loop Each track change
+        Arduino->>BS: POST /flowsheet
+        BS-->>Arduino: 200 JSON
+    end
+
+    opt Hour boundary
+        Arduino->>BS: POST /flowsheet<br/>{"message": "BREAKPOINT"}
+        BS-->>Arduino: 200 JSON
+    end
+
+    Arduino->>BS: POST /flowsheet/end
+    BS-->>Arduino: 200 JSON
+    end
+```
+
 ### 3.5 Outbound UDP: NTP Time Sync
 
 **Status**: Live over WiFi (`WiFi.getTime()`), planned over Ethernet (`NTPClient`)
@@ -706,28 +750,31 @@ AzuraCast embeds a [Centrifugo](https://centrifugal.dev/) real-time messaging se
 
 **Connection sequence**:
 
-1. Open WebSocket to `wss://remote.wxyc.org/api/live/nowplaying/websocket`
-2. Send subscription message:
-   ```json
-   {"subs": {"station:<shortcode>": {"recover": true}}}
-   ```
-   The `recover: true` flag enables Centrifugo's connection recovery (missed messages are replayed on reconnect). The station shortcode must be verified -- see Open Question 9.
-3. Receive initial cached data immediately on connect (no waiting for next track change):
-   ```json
-   {
-       "connect": {
-           "subs": {
-               "station:<shortcode>": {
-                   "publications": [{"data": {"np": { ... }}}]
-               }
-           }
-       }
-   }
-   ```
-4. Receive subsequent updates as they occur:
-   ```json
-   {"channel": "station:<shortcode>", "pub": {"data": {"np": { ... }}}}
-   ```
+```mermaid
+sequenceDiagram
+    participant Arduino
+    participant AZ as "AzuraCast (Centrifugo)"
+
+    Arduino->>AZ: WebSocket upgrade<br/>(wss://remote.wxyc.org/api/live/nowplaying/websocket)
+    AZ-->>Arduino: 101 Switching Protocols
+
+    Arduino->>AZ: {"subs": {"station:shortcode": {"recover": true}}}
+    AZ-->>Arduino: {"connect": {"subs": {"station:shortcode": {"publications": [...]}}}}
+    Note right of Arduino: Initial cached now-playing<br/>data received immediately
+
+    AZ->>Arduino: {"channel": "station:shortcode", "pub": {"data": {"np": {...}}}}
+    Note right of Arduino: Track change:<br/>new sh_id detected
+
+    Note over Arduino,AZ: Connection lost
+
+    Arduino->>AZ: WebSocket reconnect<br/>(exponential backoff: 1s, 2s, 4s, ... 60s cap)
+    AZ-->>Arduino: 101 Switching Protocols
+    Arduino->>AZ: {"subs": {"station:shortcode": {"recover": true}}}
+    AZ-->>Arduino: Missed publications replayed
+    Note right of Arduino: recover: true replays<br/>messages missed during disconnect
+```
+
+The `recover: true` flag enables Centrifugo's connection recovery -- on reconnect, the server replays messages missed during the disconnection window. The station shortcode must be verified -- see Open Question 9.
 
 **Relevant fields in `np`**:
 
@@ -947,11 +994,49 @@ The only scenario that still requires physical access is if **both** the Etherne
 3. Push the new key to the Arduino via `set_config` (over WebSocket or HTTP fallback).
 4. After the Arduino acknowledges, remove the old key from the server.
 
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant Server as "tubafrenzy / Mgmt Server"
+    participant Arduino
+
+    Admin->>Server: Update AUTO_DJ_API_KEY env<br/>to accept old + new
+    Note over Server: Both keys valid temporarily
+
+    Admin->>Server: POST /api/auto-dj/commands<br/>{"action": "set_config",<br/>"key": "api_key", "value": "new-key"}
+    Server->>Arduino: {"type": "command",<br/>"action": "set_config",<br/>"key": "api_key", "value": "new-key"}
+    Arduino->>Arduino: Write new key to KVStore
+    Arduino->>Server: {"type": "ack", "status": "ok"}
+    Server-->>Admin: Command acknowledged
+
+    Admin->>Server: Remove old key from env
+    Note over Server: Only new key valid
+```
+
 #### Backend-Service token rotation
 
 1. Mint a new PAT in Better Auth.
 2. Push the new PAT to the Arduino via `set_config` with `key=backend_service_token`.
 3. Arduino acknowledges; old PAT can be revoked.
+
+```mermaid
+sequenceDiagram
+    participant Admin
+    participant BA as Better Auth
+    participant Server as Mgmt Server
+    participant Arduino
+
+    Admin->>BA: Mint new PAT
+    BA-->>Admin: new-PAT
+
+    Admin->>Server: POST /api/auto-dj/commands<br/>{"action": "set_config",<br/>"key": "backend_service_token",<br/>"value": "new-PAT"}
+    Server->>Arduino: {"type": "command",<br/>"action": "set_config",<br/>"key": "backend_service_token",<br/>"value": "new-PAT"}
+    Arduino->>Arduino: Write new PAT to KVStore
+    Arduino->>Server: {"type": "ack", "status": "ok"}
+    Server-->>Admin: Command acknowledged
+
+    Admin->>BA: Revoke old PAT
+```
 
 ### 4.7 Credential Fallback and Recovery
 
