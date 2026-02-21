@@ -66,10 +66,17 @@ stateDiagram-v2
 ## Hardware
 
 - Arduino Giga R1 WiFi
+- Arduino Ethernet Shield Rev2 (W5500 + SD)
 - Dry contact relay from mixing board AUX channel
 - 220 ohm resistor + LED (optional status indicator)
 
 See [docs/wiring.md](docs/wiring.md) for wiring details.
+
+## Enclosure
+
+A modified 3D-printed enclosure based on the [GIGA Display Shield case](https://www.printables.com/model/605051), adapted for the Ethernet Shield Rev2. The enclosure is a sealed three-piece design (base, shield shelf, lid) with cutouts for RJ45, SD card, and a 4-position Euroblock screw terminal for the relay interface.
+
+See [enclosure/README.md](enclosure/README.md) for build instructions, BOM, and assembly guide. The full mechanical specification is in [docs/enclosure-specification.md](docs/enclosure-specification.md).
 
 ## Required Libraries
 

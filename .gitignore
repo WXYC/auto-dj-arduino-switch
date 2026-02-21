@@ -13,3 +13,6 @@ build/
 
 # Secrets (contains WiFi password and API key)
 auto-dj-arduino-switch/secrets.h
+
+# Enclosure rendered outputs (regenerated via `make -C enclosure all`)
+enclosure/output/
