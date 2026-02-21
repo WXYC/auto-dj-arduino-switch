@@ -66,10 +66,10 @@ module terminal_bracket() {
 }
 
 module terminal_bracket_in_case() {
-    // Bracket positioned behind the terminal wall cutout.
+    // Bracket positioned behind the terminal wall cutout on the right wall.
     // The bracket's front face sits against the inside of the wall.
     translate([
-        rj45_wall_x + wall_thickness + bracket_thickness / 2,
+        cutout_wall_x - wall_thickness - bracket_thickness / 2,
         terminal_case_y,
         terminal_case_z
     ])

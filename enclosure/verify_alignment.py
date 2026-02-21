@@ -102,34 +102,17 @@ def verify_rj45(cfg: dict[str, float]) -> VerificationResult:
     return result
 
 
-def verify_sd(cfg: dict[str, float]) -> VerificationResult:
-    """Verify SD card cutout dimensions and position."""
-    result = VerificationResult("SD Card Cutout")
+def verify_sd_inaccessible(cfg: dict[str, float]) -> VerificationResult:
+    """Verify that the SD card is documented as inaccessible."""
+    result = VerificationResult("SD Card (no cutout)")
 
-    slot_w = cfg.get("sd_slot_w", 12.0)
-    slot_h = cfg.get("sd_slot_h", 2.5)
-    cutout_w = cfg.get("sd_cutout_w", 0)
-    cutout_h = cfg.get("sd_cutout_h", 0)
-    min_clearance = 0.5
-
+    # SD card is in the center of the case, inaccessible from any wall.
+    # Just verify the slot dimensions are still recorded for reference.
+    slot_w = cfg.get("sd_slot_w", 0)
     result.check(
-        f"Width >= slot + clearance ({slot_w} + {2*min_clearance})",
-        cutout_w >= slot_w + 2 * min_clearance,
-        f"cutout={cutout_w}, min={slot_w + 2*min_clearance}"
-    )
-
-    result.check(
-        f"Height >= slot + clearance ({slot_h} + {2*min_clearance})",
-        cutout_h >= slot_h + 2 * min_clearance,
-        f"cutout={cutout_h}, min={slot_h + 2*min_clearance}"
-    )
-
-    # Chamfer exists
-    chamfer_h = cfg.get("sd_chamfer_height", 0)
-    result.check(
-        "Fingernail chamfer present",
-        chamfer_h > 0,
-        f"chamfer_height={chamfer_h}"
+        "SD slot dimensions recorded for reference",
+        slot_w > 0,
+        f"sd_slot_w={slot_w}"
     )
 
     return result
@@ -240,7 +223,7 @@ def main() -> None:
 
     verifications = [
         verify_rj45(cfg),
-        verify_sd(cfg),
+        verify_sd_inaccessible(cfg),
         verify_terminal(cfg),
         verify_support_post(cfg),
         verify_clearances(cfg),

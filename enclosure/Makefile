@@ -20,15 +20,13 @@ SHELF_STL   := $(OUTDIR)/shelf.stl
 BRACKET_STL := $(OUTDIR)/terminal_bracket.stl
 
 SLICE_RJ45  := $(OUTDIR)/test_slice_rj45_wall.stl
-SLICE_SD    := $(OUTDIR)/test_slice_sd_wall.stl
 
 XSEC_RJ45     := $(OUTDIR)/cross_section_rj45.svg
-XSEC_SD       := $(OUTDIR)/cross_section_sd.svg
 XSEC_TERMINAL := $(OUTDIR)/cross_section_terminal.svg
 
 ALL_STLS  := $(LID_STL) $(BASE_STL) $(SHELF_STL) $(BRACKET_STL)
-ALL_SLICES := $(SLICE_RJ45) $(SLICE_SD)
-ALL_XSECS := $(XSEC_RJ45) $(XSEC_SD) $(XSEC_TERMINAL)
+ALL_SLICES := $(SLICE_RJ45)
+ALL_XSECS := $(XSEC_RJ45) $(XSEC_TERMINAL)
 
 # ===================================================================
 # Targets
@@ -70,18 +68,12 @@ $(BRACKET_STL): $(BRACKET_SRC) $(CONFIG) | $(OUTDIR)
 $(SLICE_RJ45): $(SLICE_SRC) $(CONFIG) | $(OUTDIR)
 	$(OPENSCAD) -D 'slice="rj45"' -o $@ $(SLICE_SRC)
 
-$(SLICE_SD): $(SLICE_SRC) $(CONFIG) | $(OUTDIR)
-	$(OPENSCAD) -D 'slice="sd"' -o $@ $(SLICE_SRC)
-
 # ===================================================================
 # Cross-section SVGs
 # ===================================================================
 
 $(XSEC_RJ45): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
 	$(OPENSCAD) -D 'section="rj45"' -o $@ $(XSEC_SRC)
-
-$(XSEC_SD): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
-	$(OPENSCAD) -D 'section="sd"' -o $@ $(XSEC_SRC)
 
 $(XSEC_TERMINAL): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
 	$(OPENSCAD) -D 'section="terminal"' -o $@ $(XSEC_SRC)
