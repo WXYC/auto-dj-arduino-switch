@@ -75,7 +75,7 @@ make analyze
 | `terminal_bracket.scad` | New part: internal connector mount |
 | `board_model.scad` | Simplified Ethernet Shield 3D model for verification |
 | `test_slices.scad` | Thin wall slices for pre-print fit testing |
-| `cross_sections.scad` | 2D projections for 1:1 paper templates |
+| `cross_section.py` | Slices rendered STLs to generate 1:1 cross-section SVGs |
 | `analyze_stl.py` | Extracts bounding boxes from original STLs |
 | `verify_alignment.py` | Validates cutout positions against EAGLE BRD data |
 | `Makefile` | Build targets for all outputs |

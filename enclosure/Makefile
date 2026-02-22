@@ -11,7 +11,7 @@ BASE_SRC := $(SRCDIR)/base.scad
 SHELF_SRC := $(SRCDIR)/shelf.scad
 BRACKET_SRC := $(SRCDIR)/terminal_bracket.scad
 SLICE_SRC := $(SRCDIR)/test_slices.scad
-XSEC_SRC := $(SRCDIR)/cross_sections.scad
+XSEC_SRC := $(SRCDIR)/cross_section.py
 
 # Output files
 LID_STL     := $(OUTDIR)/lid.stl
@@ -77,14 +77,14 @@ $(SLICE_SD): $(SLICE_SRC) $(CONFIG) | $(OUTDIR)
 # Cross-section SVGs
 # ===================================================================
 
-$(XSEC_RJ45): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
-	$(OPENSCAD) -D 'section="rj45"' -o $@ $(XSEC_SRC)
+$(XSEC_RJ45): $(XSEC_SRC) $(CONFIG) $(BASE_STL) $(SHELF_STL) | $(OUTDIR)
+	$(PYTHON) $(XSEC_SRC) rj45
 
-$(XSEC_SD): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
-	$(OPENSCAD) -D 'section="sd"' -o $@ $(XSEC_SRC)
+$(XSEC_SD): $(XSEC_SRC) $(CONFIG) $(BASE_STL) $(SHELF_STL) | $(OUTDIR)
+	$(PYTHON) $(XSEC_SRC) sd
 
-$(XSEC_TERMINAL): $(XSEC_SRC) $(CONFIG) | $(OUTDIR)
-	$(OPENSCAD) -D 'section="terminal"' -o $@ $(XSEC_SRC)
+$(XSEC_TERMINAL): $(XSEC_SRC) $(CONFIG) $(BASE_STL) $(SHELF_STL) | $(OUTDIR)
+	$(PYTHON) $(XSEC_SRC) terminal
 
 # ===================================================================
 # Verification
