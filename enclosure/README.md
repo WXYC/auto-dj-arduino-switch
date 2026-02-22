@@ -42,26 +42,29 @@ The SD card slot (13.0 x 3.5 mm) is on the opposite wall (+X), with a fingernail
 
 ## Building
 
-Requires [OpenSCAD](https://openscad.org/) (`brew install openscad`) and Python 3.10+.
+Requires [OpenSCAD](https://openscad.org/) (`brew install --cask openscad`) and Python 3.10+.
 
 ```bash
-# Verify cutout dimensions against EAGLE BRD data
-make verify
-
 # Render all output STLs
 make stls
-
-# Render test slices for quick fit checks
-make slices
 
 # Generate cross-section SVGs for paper templates
 make cross-sections
 
-# Build everything
+# Render test slices for quick fit checks
+make slices
+
+# Build everything (STLs + slices + cross-sections)
 make all
+
+# Verify cutout dimensions against EAGLE BRD data
+make verify
 
 # Analyze original STL geometry
 make analyze
+
+# Remove all generated files
+make clean
 ```
 
 ## File Structure
