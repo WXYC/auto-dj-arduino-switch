@@ -10,9 +10,9 @@ The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's au
 
 ### 1.2 Problem Statement
 
-The device sits inside the WXYC studio, wired into the mixing board. Today, every configuration change -- including the annual UNC-PSK password rotation -- requires someone to walk to the studio with a laptop, connect via USB, and reflash the firmware. There is no way to check whether the device is alive, inspect its state, or intervene remotely. For a device designed to run unattended, this is untenable.
+The device will sit inside the WXYC studio, wired into the mixing board. Once deployed, every configuration change -- including the annual UNC-PSK password rotation -- would require someone to walk to the studio with a laptop, connect via USB, and reflash the firmware. There would be no way to check whether the device is alive, inspect its state, or intervene remotely. For a device designed to run unattended, this is untenable.
 
-Beyond remote access, the device currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service), and the Arduino must support both targets during the transition and afterward.
+Beyond remote access, the firmware currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service), and the Arduino must support both targets during the transition and afterward.
 
 ### 1.3 Document Scope
 
@@ -86,7 +86,7 @@ flowchart TD
     style MS stroke-dasharray: 5 5
 ```
 
-Dashed lines indicate planned connections not yet implemented. Solid lines are in production today.
+Dashed lines indicate planned connections not yet implemented. Solid lines represent implemented functionality.
 
 **Ethernet mode** (primary): All traffic flows through the W5500 Ethernet Shield with software TLS ([SSLClient](https://github.com/OPEnSLab-OSU/SSLClient) + [BearSSL](https://bearssl.org/)). The WebSocket to the management server stays open persistently.
 
@@ -124,11 +124,11 @@ This means:
 | Constraint | Detail |
 |-----------|--------|
 | **Network** | UNC campus networks are behind NAT with no inbound port access. The Arduino cannot host a server reachable from outside campus. All remote access must be outbound-initiated. |
-| **Hardware** | [Arduino Giga R1 WiFi](https://docs.arduino.cc/hardware/giga-r1-wifi/) ([STM32H747XI](https://www.st.com/en/microcontrollers-microprocessors/stm32h747xi.html)). 1 MB SRAM, 2 MB internal flash, 16 MB QSPI flash. No persistent storage is used today. |
+| **Hardware** | [Arduino Giga R1 WiFi](https://docs.arduino.cc/hardware/giga-r1-wifi/) ([STM32H747XI](https://www.st.com/en/microcontrollers-microprocessors/stm32h747xi.html)). 1 MB SRAM, 2 MB internal flash, 16 MB QSPI flash. The firmware does not currently use persistent storage. |
 | **Ethernet** | An [Arduino Ethernet Shield 2](https://docs.arduino.cc/hardware/ethernet-shield-rev2/) (W5500, SPI-based) can be mounted on the Giga R1's Mega-compatible headers. The W5500 has a hardware TCP/IP stack. The studio needs a live Ethernet jack (verify with UNC ITS). |
 | **WiFi** | Built-in WiFi (UNC-PSK, WPA2). `WiFi.begin()` blocks for up to 36 seconds on reconnection (known Giga R1 firmware bug). A global `WiFiSSLClient` crashes the board; the current code creates and destroys one per HTTP call as a workaround. |
 | **TLS** | The W5500 handles TCP but not TLS. Software TLS is required for HTTPS over Ethernet (via `SSLClient` + BearSSL or [Mbed TLS](https://github.com/Mbed-TLS/mbedtls)). The STM32H747's Cortex-M7 at 480 MHz has ample power for this. `WiFiSSLClient` handles TLS in the WiFi module's firmware and is unaffected. |
-| **Existing infra** | The device already makes outbound HTTPS calls to `remote.wxyc.org` (AzuraCast) and `www.wxyc.info` (tubafrenzy). |
+| **Existing infra** | The firmware already implements outbound HTTPS calls to `remote.wxyc.org` (AzuraCast) and `www.wxyc.info` (tubafrenzy). |
 
 **NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The [`NTPClient`](https://github.com/arduino-libraries/NTPClient) library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See [Section 3.5](#35-outbound-udp-ntp-time-sync).
 
@@ -198,7 +198,7 @@ AzuraCast exposes now-playing data through two interfaces. The Arduino uses both
 
 | Interface | Protocol | Endpoint | Latency | Transport | Status |
 |-----------|----------|----------|---------|-----------|--------|
-| **Static HTTP** | HTTPS GET | `/api/nowplaying_static/main.json` | Up to 20s (poll interval) | Both (WiFi + Ethernet) | **Live** |
+| **Static HTTP** | HTTPS GET | `/api/nowplaying_static/main.json` | Up to 20s (poll interval) | Both (WiFi + Ethernet) | **Implemented** |
 | **Centrifugo WebSocket** | WSS | `/api/live/nowplaying/websocket` | Near-real-time (push) | Ethernet only | Planned |
 
 Both interfaces are **public** -- no authentication required. Both return the same logical data (`sh_id`, `artist`, `title`, `album`, `is_live`). The [ArduinoJson](https://arduinojson.org/) filter document is identical for both. The `AzuraCastClient` consumes the same fields regardless of source.
@@ -206,7 +206,7 @@ Both interfaces are **public** -- no authentication required. Both return the sa
 **Dual-mode strategy** ([Section 3.9.2](#392-dual-mode-architecture)):
 
 - **Ethernet (push mode)**: Subscribe to Centrifugo WebSocket for near-real-time track change notifications. A 60-second safety-net HTTP poll catches any missed messages.
-- **WiFi (poll mode)**: Poll the static HTTP endpoint every 20 seconds. No persistent connections. This is the current production behavior.
+- **WiFi (poll mode)**: Poll the static HTTP endpoint every 20 seconds. No persistent connections. This is the current implemented behavior.
 
 **What AzuraCast is NOT**: AzuraCast is an external system operated by WXYC's streaming infrastructure team, not something this project builds or deploys. The Arduino treats it as a read-only data source. AzuraCast has no knowledge of the Arduino, the flowsheet, or the management server. The now-playing feed is completely independent of the management channel ([Section 2.4](#24-management-server)).
 
@@ -247,10 +247,10 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 
 | # | Direction | Protocol | Endpoint / Channel | Auth | Content Type | Transport | Status |
 |---|-----------|----------|-------------------|------|-------------|-----------|--------|
-| 1 | Arduino → AzuraCast | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Live** |
-| 2 | Arduino → tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
-| 3 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
-| 4 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Live** |
+| 1 | Arduino → AzuraCast | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Implemented** |
+| 2 | Arduino → tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
+| 3 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
+| 4 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
 | 5 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer token | JSON | Both | Planned |
 | 6 | Arduino → Backend-Service | HTTPS POST | `/flowsheet` | Bearer token | JSON | Both | Planned |
 | 7 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer token | JSON | Both | Planned |
@@ -261,11 +261,11 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 | 12 | Arduino → Mgmt Server | HTTPS GET | `/api/auto-dj/commands` | `X-Auto-DJ-Key` | JSON response | WiFi (fallback) | Planned |
 | 13 | Admin UI → Mgmt Server | HTTPS POST | `/api/auto-dj/commands` | Better Auth session | JSON | N/A | Planned |
 | 14 | Admin UI → Mgmt Server | HTTPS GET | `/api/auto-dj/status` | Better Auth session | JSON response | N/A | Planned |
-| 15 | Arduino → NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Live** |
+| 15 | Arduino → NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Implemented** |
 
 ### 3.2 Outbound HTTP: AzuraCast Now Playing
 
-**Status**: Live (implemented in [`azuracast_client.cpp`](../auto-dj-arduino-switch/azuracast_client.cpp))
+**Status**: Implemented (in [`azuracast_client.cpp`](../auto-dj-arduino-switch/azuracast_client.cpp))
 
 The Arduino polls AzuraCast's static now-playing endpoint to detect track changes.
 
@@ -302,7 +302,7 @@ filter["live"]["is_live"] = true;
 
 ### 3.3 Outbound HTTP: tubafrenzy Flowsheet Operations
 
-**Status**: Live (implemented in [`flowsheet_client.cpp`](../auto-dj-arduino-switch/flowsheet_client.cpp))
+**Status**: Implemented (in [`flowsheet_client.cpp`](../auto-dj-arduino-switch/flowsheet_client.cpp))
 
 All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success (the servlet redirects to a JSP page, but the Arduino does not follow the redirect). [`ArduinoHttpClient`](https://github.com/arduino-libraries/ArduinoHttpClient) does not follow redirects by default, which is the desired behavior.
 
@@ -519,7 +519,7 @@ sequenceDiagram
 
 ### 3.5 Outbound UDP: NTP Time Sync
 
-**Status**: Live over WiFi (`WiFi.getTime()`), planned over Ethernet (`NTPClient`)
+**Status**: Implemented over WiFi (`WiFi.getTime()`), planned over Ethernet (`NTPClient`)
 
 | Field | Value |
 |-------|-------|
@@ -946,7 +946,7 @@ See [Appendix B](#appendix-b-azuracast-centrifugo-integration-details) for the r
 
 ### 4.2 tubafrenzy Authentication
 
-**Status**: Live (implemented in `flowsheet_client.cpp`)
+**Status**: Implemented (in `flowsheet_client.cpp`)
 
 The Arduino authenticates to tubafrenzy by sending the `X-Auto-DJ-Key` header with every request. The server validates this via `XYCCatalogServlet.isAutoDJRequest()`:
 
