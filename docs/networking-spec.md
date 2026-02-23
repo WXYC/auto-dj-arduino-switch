@@ -6,7 +6,7 @@ This document specifies all network communication for the Auto DJ Arduino Switch
 
 ### 1.1 Purpose
 
-The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's auto DJ system ([AzuraCast](https://www.azuracast.com/)) with the station's flowsheet. It makes outbound HTTPS calls to two different servers, and will eventually maintain a persistent WebSocket connection to a management server. This document is the single source of truth for all of that network traffic.
+The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's auto DJ system ([AzuraCast](https://www.azuracast.com/)) with the station's flowsheet. It makes outbound HTTPS calls to two different servers and maintains a persistent WebSocket connection to a management server. This document is the single source of truth for all of that network traffic.
 
 ### 1.2 Problem Statement
 
