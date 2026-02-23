@@ -17,9 +17,20 @@ class RelayMonitor {
 public:
     RelayMonitor(int relayPin, int ledPin, unsigned long debounceMs);
     void setUp();
+
+    /** Hardware wrapper: reads relay pin, runs debounce, writes LED pin. */
     void update();
+
+    /**
+     * Parameterized update for desktop testing. Contains all debounce logic
+     * with no hardware dependencies -- updates debouncedState, changed,
+     * lastReading, lastChangeTime, and ledState based on passed-in values.
+     */
+    void update(unsigned long currentMillis, int currentReading);
+
     bool isAutoDJActive() const;
     bool stateChanged() const;
+    int getLedState() const;
 
 private:
     int relayPin;
@@ -30,6 +41,7 @@ private:
     int lastReading;
     unsigned long lastChangeTime;
     bool changed;
+    int ledState;
 };
 
 #endif

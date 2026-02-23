@@ -8,6 +8,7 @@ RelayMonitor::RelayMonitor(int relayPin, int ledPin, unsigned long debounceMs)
     , lastReading(HIGH)
     , lastChangeTime(0)
     , changed(false)
+    , ledState(LOW)
 {
 }
 
@@ -16,27 +17,32 @@ void RelayMonitor::setUp() {
     pinMode(ledPin, OUTPUT);
     debouncedState = digitalRead(relayPin);
     lastReading = debouncedState;
-    digitalWrite(ledPin, debouncedState == LOW ? HIGH : LOW);
+    ledState = debouncedState == LOW ? HIGH : LOW;
+    digitalWrite(ledPin, ledState);
 }
 
 void RelayMonitor::update() {
-    changed = false;
-    int reading = digitalRead(relayPin);
+    update(millis(), digitalRead(relayPin));
+    digitalWrite(ledPin, ledState);
+}
 
-    if (reading != lastReading) {
-        lastChangeTime = millis();
+void RelayMonitor::update(unsigned long currentMillis, int currentReading) {
+    changed = false;
+
+    if (currentReading != lastReading) {
+        lastChangeTime = currentMillis;
     }
 
-    if ((millis() - lastChangeTime) > debounceMs) {
-        if (reading != debouncedState) {
-            debouncedState = reading;
+    if ((currentMillis - lastChangeTime) > debounceMs) {
+        if (currentReading != debouncedState) {
+            debouncedState = currentReading;
             changed = true;
             // LED on when auto DJ is active (relay closed = LOW)
-            digitalWrite(ledPin, debouncedState == LOW ? HIGH : LOW);
+            ledState = debouncedState == LOW ? HIGH : LOW;
         }
     }
 
-    lastReading = reading;
+    lastReading = currentReading;
 }
 
 bool RelayMonitor::isAutoDJActive() const {
@@ -46,4 +52,8 @@ bool RelayMonitor::isAutoDJActive() const {
 
 bool RelayMonitor::stateChanged() const {
     return changed;
+}
+
+int RelayMonitor::getLedState() const {
+    return ledState;
 }

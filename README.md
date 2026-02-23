@@ -149,12 +149,19 @@ To rotate the API key, update both:
 
 ## Running Tests
 
-Pure logic functions are extracted into testable modules and tested on desktop using GoogleTest with a minimal Arduino `String` shim. No Arduino hardware or SDK required.
+Sketch modules are tested on desktop using GoogleTest with an Arduino shim layer. No Arduino hardware or SDK required. The shim provides `String`, `Print`, `Stream`, `Client`, GPIO stubs, and controllable `millis()`. Real ArduinoHttpClient and ArduinoJson libraries are compiled against the shim via CMake FetchContent.
 
-- **`utils.h`/`utils.cpp`** -- `urlEncode`, `parseRadioShowID`, `currentHourMs`
-- **`state_machine.h`/`state_machine.cpp`** -- `tick()` (state transitions, retry logic, polling decisions)
+**82 tests** cover:
 
-The state machine `tick()` function is a pure function: it takes a `Context` (persisted state) and `Inputs` (sensor snapshot + I/O results) and returns a `TickResult` (updated context + actions for the orchestrator). The `.ino` `loop()` is a thin orchestrator that performs I/O and delegates all decision logic to `tick()`.
+| Module | Tests | Technique |
+|--------|-------|-----------|
+| `utils.h` | 19 | Pure functions (urlEncode, parseRadioShowID, currentHourMs) |
+| `state_machine.h` | 32 | Pure function tick(): state transitions, retries, WiFi loss |
+| `relay_monitor.h` | 12 | Parameterized `update(millis, reading)` bypasses GPIO |
+| `azuracast_client.h` | 9 | `poll(Client&)` with FakeClient pre-loaded HTTP/JSON responses |
+| `flowsheet_client.h` | 10 | `Client&` injection, request body assertions, 302/500 handling |
+
+The I/O modules use dependency injection: `Client&` parameters replace hardcoded `WiFiSSLClient` creation, and `RelayMonitor::update(millis, reading)` replaces `digitalRead()`/`millis()` calls. The `.ino` orchestrator creates `WiFiSSLClient` at each call site and passes it in.
 
 ```bash
 cmake -B test/build test/

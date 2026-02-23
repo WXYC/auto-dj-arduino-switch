@@ -2,8 +2,6 @@
 #include "config.h"
 #include "utils.h"
 
-#include <WiFi.h>
-#include <WiFiSSLClient.h>
 #include <ArduinoHttpClient.h>
 
 FlowsheetClient::FlowsheetClient(const char* host, int port, const char* apiKey)
@@ -19,9 +17,8 @@ FlowsheetClient::FlowsheetClient(const char* host, int port, const char* apiKey)
  * POSTs a form-encoded body and returns the HTTP status code, or -1 on error.
  * Fully reads the response body and stops the client to prevent socket leaks.
  */
-int FlowsheetClient::postForm(const char* path, const String& body) {
-    WiFiSSLClient ssl;
-    HttpClient http(ssl, host, port);
+int FlowsheetClient::postForm(Client& client, const char* path, const String& body) {
+    HttpClient http(client, host, port);
     http.setHttpResponseTimeout(HTTP_RESPONSE_TIMEOUT_MS);
 
     http.beginRequest();
@@ -43,9 +40,8 @@ int FlowsheetClient::postForm(const char* path, const String& body) {
  * POSTs a form-encoded body and returns the Location header from a 302 redirect.
  * Returns empty string on failure.
  */
-String FlowsheetClient::getLocationHeader(const char* path, const String& body) {
-    WiFiSSLClient ssl;
-    HttpClient http(ssl, host, port);
+String FlowsheetClient::getLocationHeader(Client& client, const char* path, const String& body) {
+    HttpClient http(client, host, port);
     http.setHttpResponseTimeout(HTTP_RESPONSE_TIMEOUT_MS);
 
     http.beginRequest();
@@ -83,7 +79,7 @@ String FlowsheetClient::getLocationHeader(const char* path, const String& body) 
 
 // ========== Public API ==========
 
-int FlowsheetClient::startShow(unsigned long startingHourMs) {
+int FlowsheetClient::startShow(Client& client, unsigned long startingHourMs) {
     Serial.println("[Flowsheet] Starting show...");
 
     String body = "djID=" + String(AUTO_DJ_ID)
@@ -92,7 +88,7 @@ int FlowsheetClient::startShow(unsigned long startingHourMs) {
         + "&showName=" + urlEncode(AUTO_DJ_SHOW_NAME)
         + "&startingHour=" + String(startingHourMs);
 
-    String location = getLocationHeader(TUBAFRENZY_PATH_START_SHOW, body);
+    String location = getLocationHeader(client, TUBAFRENZY_PATH_START_SHOW, body);
     if (location.length() == 0) {
         Serial.println("[Flowsheet] Failed to start show (no Location header).");
         return -1;
@@ -110,7 +106,7 @@ int FlowsheetClient::startShow(unsigned long startingHourMs) {
     return radioShowID;
 }
 
-bool FlowsheetClient::addEntry(int radioShowID, unsigned long workingHourMs,
+bool FlowsheetClient::addEntry(Client& client, int radioShowID, unsigned long workingHourMs,
                                 const String& artist, const String& title,
                                 const String& album) {
     Serial.print("[Flowsheet] Adding entry: ");
@@ -126,7 +122,7 @@ bool FlowsheetClient::addEntry(int radioShowID, unsigned long workingHourMs,
         + "&releaseType=otherRelease"
         + "&autoBreakpoint=true";
 
-    int status = postForm(TUBAFRENZY_PATH_ADD_ENTRY, body);
+    int status = postForm(client, TUBAFRENZY_PATH_ADD_ENTRY, body);
     if (status == 302) {
         Serial.println("[Flowsheet] Entry added.");
         return true;
@@ -137,13 +133,13 @@ bool FlowsheetClient::addEntry(int radioShowID, unsigned long workingHourMs,
     return false;
 }
 
-bool FlowsheetClient::endShow(int radioShowID) {
+bool FlowsheetClient::endShow(Client& client, int radioShowID) {
     Serial.println("[Flowsheet] Ending show...");
 
     String body = "radioShowID=" + String(radioShowID)
         + "&mode=signoffConfirm";
 
-    int status = postForm(TUBAFRENZY_PATH_END_SHOW, body);
+    int status = postForm(client, TUBAFRENZY_PATH_END_SHOW, body);
     if (status == 302) {
         Serial.print("[Flowsheet] Show ended, radioShowID=");
         Serial.println(radioShowID);

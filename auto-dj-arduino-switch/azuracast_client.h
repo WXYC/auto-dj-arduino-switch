@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 
+class Client; // Forward declaration for Client& parameter
+
 /**
  * Polls the AzuraCast now-playing API and detects track changes.
  *
@@ -19,11 +21,18 @@ public:
     AzuraCastClient(const char* host, int port, const char* path);
 
     /**
-     * Polls the AzuraCast API. Returns true if a new track is detected.
-     * Creates and destroys the SSL client within the call to avoid
-     * the Giga R1 global WiFiClient crash bug.
+     * Polls the AzuraCast API using the given Client. Returns true if a new
+     * track is detected. The caller owns the Client's lifecycle.
+     */
+    bool poll(Client& client);
+
+#ifndef DESKTOP_TEST
+    /**
+     * Hardware convenience wrapper: creates a WiFiSSLClient internally.
+     * Only available on Arduino (excluded from desktop builds).
      */
     bool poll();
+#endif
 
     String getArtist() const;
     String getTitle() const;
