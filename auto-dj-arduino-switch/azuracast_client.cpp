@@ -1,10 +1,14 @@
 #include "azuracast_client.h"
 #include "config.h"
 
+#ifndef DESKTOP_TEST
 #include <WiFi.h>
 #include <WiFiSSLClient.h>
+#endif
+
 #include <ArduinoHttpClient.h>
 #include <ArduinoJson.h>
+#include <Client.h>
 
 AzuraCastClient::AzuraCastClient(const char* host, int port, const char* path)
     : host(host)
@@ -15,11 +19,8 @@ AzuraCastClient::AzuraCastClient(const char* host, int port, const char* path)
 {
 }
 
-bool AzuraCastClient::poll() {
-    // Create SSL client locally to avoid the Giga R1 global WiFiClient crash bug.
-    // Must call stop() before going out of scope to prevent socket leak.
-    WiFiSSLClient ssl;
-    HttpClient http(ssl, host, port);
+bool AzuraCastClient::poll(Client& client) {
+    HttpClient http(client, host, port);
     http.setHttpResponseTimeout(HTTP_RESPONSE_TIMEOUT_MS);
 
     Serial.print("[AzuraCast] Polling...");
@@ -50,11 +51,14 @@ bool AzuraCastClient::poll() {
     filter["now_playing"]["song"]["album"] = true;
     filter["live"]["is_live"] = true;
 
-    JsonDocument doc;
-    DeserializationError jsonErr = deserializeJson(doc, http.responseStream(),
-        DeserializationOption::Filter(filter));
-
+    // Read body as String, then parse with filter. HttpClient does not extend
+    // Stream, so we buffer the body rather than streaming directly.
+    String body = http.responseBody();
     http.stop();
+
+    JsonDocument doc;
+    DeserializationError jsonErr = deserializeJson(doc, body,
+        DeserializationOption::Filter(filter));
 
     if (jsonErr) {
         Serial.print(" JSON parse error: ");
@@ -88,6 +92,15 @@ bool AzuraCastClient::poll() {
 
     return true;
 }
+
+#ifndef DESKTOP_TEST
+bool AzuraCastClient::poll() {
+    // Create SSL client locally to avoid the Giga R1 global WiFiClient crash
+    // bug. Must call stop() before going out of scope to prevent socket leak.
+    WiFiSSLClient ssl;
+    return poll(ssl);
+}
+#endif
 
 String AzuraCastClient::getArtist() const { return artist; }
 String AzuraCastClient::getTitle() const { return title; }

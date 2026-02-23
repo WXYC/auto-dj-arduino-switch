@@ -23,6 +23,7 @@
 #include "flowsheet_client.h"
 #include "utils.h"
 #include "state_machine.h"
+#include <WiFiSSLClient.h>
 
 // ========== Global State ==========
 
@@ -114,22 +115,26 @@ void loop() {
         case STARTING_SHOW: {
             unsigned long hourMs = currentHourMs(inputs.epochTime);
             if (hourMs > 0) {
-                inputs.startShowResult = flowsheet.startShow(hourMs);
+                WiFiSSLClient ssl;
+                inputs.startShowResult = flowsheet.startShow(ssl, hourMs);
             }
             break;
         }
         case AUTO_DJ_ACTIVE:
             if (inputs.currentMillis - ctx.lastPollTime >= POLL_INTERVAL_MS) {
-                inputs.pollNewTrack = azuracast.poll();
+                WiFiSSLClient ssl;
+                inputs.pollNewTrack = azuracast.poll(ssl);
                 inputs.pollLiveDJ = azuracast.isLiveDJ();
                 inputs.artist = azuracast.getArtist();
                 inputs.title = azuracast.getTitle();
                 inputs.album = azuracast.getAlbum();
             }
             break;
-        case ENDING_SHOW:
-            inputs.endShowResult = flowsheet.endShow(ctx.radioShowID);
+        case ENDING_SHOW: {
+            WiFiSSLClient ssl;
+            inputs.endShowResult = flowsheet.endShow(ssl, ctx.radioShowID);
             break;
+        }
         default:
             break;
     }
@@ -142,7 +147,8 @@ void loop() {
 
     // ---- POST-TICK I/O ----
     if (result.addEntry) {
-        flowsheet.addEntry(ctx.radioShowID, result.addEntryHourMs,
+        WiFiSSLClient ssl;
+        flowsheet.addEntry(ssl, ctx.radioShowID, result.addEntryHourMs,
             result.addEntryArtist, result.addEntryTitle, result.addEntryAlbum);
     }
     if (result.delayMs > 0) {
