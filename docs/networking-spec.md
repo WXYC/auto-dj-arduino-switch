@@ -1996,7 +1996,7 @@ At boot, the firmware reads from KVStore. If a key is missing (first boot), it f
 | D12 | SPI MISO | Shared SPI bus |
 | D13 | SPI SCK | Shared SPI bus (also LED_BUILTIN on some boards, but not on Giga R1) |
 
-The shield also has an SD card slot (CS on D4), which can be ignored or used for local logging in the future.
+The shield also has an SD card slot (CS on D4), which can be ignored or used for local logging.
 
 **Software TLS**: The W5500 handles TCP but not TLS. Two options:
 
