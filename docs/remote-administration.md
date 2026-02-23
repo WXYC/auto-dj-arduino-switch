@@ -1,10 +1,10 @@
 # Remote Administration
 
-The Auto DJ Arduino Switch is deployed inside the WXYC studio, wired into the mixing board. Every configuration change today requires physical access and a firmware reflash. This document outlines what is configurable, what should be remotely administrable, and why.
+The Auto DJ Arduino Switch will sit inside the WXYC studio, wired into the mixing board. Once deployed, every configuration change will require physical access and a firmware reflash. This document outlines what is configurable, what should be remotely administrable, and why. See [networking-spec.md](networking-spec.md) for the full network protocol specification.
 
 ## Current Configuration Model
 
-All configuration lives in two compile-time header files:
+All configuration lives in two compile-time header files ([`config.h`](../auto-dj-arduino-switch/config.h), [`secrets.h`](../auto-dj-arduino-switch/secrets.h)):
 
 ```mermaid
 graph LR
@@ -19,7 +19,7 @@ graph LR
     Firmware -->|"Flash via USB"| Arduino
 ```
 
-Any change -- a rotated API key, the annual WiFi password change, a timezone adjustment -- requires someone to walk to the studio with a laptop, connect USB, and reflash. For a device designed to operate unattended, this is a significant operational burden.
+Any change -- a rotated API key, the annual WiFi password change, a timezone adjustment -- would require someone to walk to the studio with a laptop, connect USB, and reflash. For a device designed to operate unattended, this will be a significant operational burden.
 
 ## Parameters
 
@@ -31,11 +31,11 @@ These are the most operationally urgent candidates for remote updates. Both chan
 |-----------|--------------|----------------|
 | `WIFI_SSID` | `UNC-PSK` | Could change if the university restructures its network |
 | `WIFI_PASS` | *(secret)* | UNC rotates the PSK password annually |
-| `AUTO_DJ_API_KEY` | *(secret)* | Must match the server-side env var; any rotation bricks the device |
+| `AUTO_DJ_API_KEY` | *(secret)* | Must match the server-side env var; any rotation would brick the device |
 
 ### Timezone
 
-The device defines `UTC_OFFSET_SECONDS` as `-18000` (UTC-5, EST) in `config.h` but never references it -- flowsheet timestamps (`startingHour`, `workingHour`) are UTC epoch milliseconds from NTP, which are timezone-agnostic and correct year-round. Breakpoint insertion (both tubafrenzy's `autoBreakpoint` and Backend-Service's explicit breakpoints) depends on hour-boundary changes, which align between UTC and Eastern time because the offset is a whole number of hours.
+The device defines `UTC_OFFSET_SECONDS` as `-18000` (UTC-5, EST) in `config.h` but never references it -- flowsheet timestamps (`startingHour`, `workingHour`) are UTC epoch milliseconds from NTP, which are timezone-agnostic and correct year-round. Breakpoint insertion (both [tubafrenzy](https://github.com/WXYC/tubafrenzy)'s `autoBreakpoint` and [Backend-Service](https://github.com/WXYC/Backend-Service)'s explicit breakpoints) depends on hour-boundary changes, which align between UTC and Eastern time because the offset is a whole number of hours.
 
 | Parameter | Current value | Issue |
 |-----------|--------------|-------|
@@ -45,7 +45,7 @@ Where DST awareness *would* help is human-readable output: serial debug logs, he
 
 ### Polling and Retry Behavior
 
-These timing parameters control how aggressively the device polls AzuraCast and how it handles failures. Adjusting them remotely would be useful during server maintenance windows, degraded network conditions, or testing.
+These timing parameters control how aggressively the device polls [AzuraCast](https://www.azuracast.com/) and how it handles failures. Adjusting them remotely would be useful during server maintenance windows, degraded network conditions, or testing.
 
 | Parameter | Current value | Purpose |
 |-----------|--------------|---------|
@@ -83,7 +83,7 @@ These fields are written directly into the flowsheet database when a show starts
 
 ### Flowsheet API Parameters
 
-These values are hardcoded in `flowsheet_client.cpp` rather than in `config.h`. They are tightly coupled to the tubafrenzy server API, but would need to be updated if that API changes.
+These values are hardcoded in [`flowsheet_client.cpp`](../auto-dj-arduino-switch/flowsheet_client.cpp) rather than in `config.h`. They are tightly coupled to the tubafrenzy server API, but would need to be updated if that API changes.
 
 | Parameter | Current value | Location | Purpose |
 |-----------|--------------|----------|---------|
@@ -97,9 +97,9 @@ These values are hardcoded in the sketch and module implementations. They are mi
 
 | Parameter | Current value | Location | Purpose |
 |-----------|--------------|----------|---------|
-| Serial wait timeout | `3000` ms | `auto-dj-arduino-switch.ino:69` | How long to wait for serial port at boot |
+| Serial wait timeout | `3000` ms | [`auto-dj-arduino-switch.ino`](../auto-dj-arduino-switch/auto-dj-arduino-switch.ino)`:69` | How long to wait for serial port at boot |
 | Heartbeat blink period | `1000` ms | `auto-dj-arduino-switch.ino:95` | Built-in LED blink rate (1 Hz) |
-| Initial WiFi connect timeout | `30000` ms | `wifi_manager.cpp` | Max wait during first connection in `setup()` |
+| Initial WiFi connect timeout | `30000` ms | [`wifi_manager.cpp`](../auto-dj-arduino-switch/wifi_manager.cpp) | Max wait during first connection in `setup()` |
 | WiFi chip settling delay | `100` ms | `wifi_manager.cpp` | Delay between `WiFi.disconnect()` and `WiFi.begin()` |
 | Reconnect poll granularity | `250` ms | `wifi_manager.cpp` | Poll interval inside the reconnect wait loop |
 | Reconnect attempt timeout | `5000` ms | `wifi_manager.cpp` | Per-attempt timeout during reconnection (separate from `WIFI_RETRY_INTERVAL_MS`) |

@@ -6,13 +6,13 @@ This document specifies all network communication for the Auto DJ Arduino Switch
 
 ### 1.1 Purpose
 
-The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's auto DJ system (AzuraCast) with the station's flowsheet. It makes outbound HTTPS calls to two different servers, and will eventually maintain a persistent WebSocket connection to a management server. This document is the single source of truth for all of that network traffic.
+The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's auto DJ system ([AzuraCast](https://www.azuracast.com/)) with the station's flowsheet. It makes outbound HTTPS calls to two different servers, and will eventually maintain a persistent WebSocket connection to a management server. This document is the single source of truth for all of that network traffic.
 
 ### 1.2 Problem Statement
 
 The device sits inside the WXYC studio, wired into the mixing board. Today, every configuration change -- including the annual UNC-PSK password rotation -- requires someone to walk to the studio with a laptop, connect via USB, and reflash the firmware. There is no way to check whether the device is alive, inspect its state, or intervene remotely. For a device designed to run unattended, this is untenable.
 
-Beyond remote access, the device currently only writes to one flowsheet backend (tubafrenzy). WXYC is migrating its flowsheet infrastructure to Backend-Service, and the Arduino must support both targets during the transition and afterward.
+Beyond remote access, the device currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service), and the Arduino must support both targets during the transition and afterward.
 
 ### 1.3 Document Scope
 
@@ -20,7 +20,7 @@ This document covers:
 
 - All network traffic to and from the Arduino (HTTP, WebSocket, UDP)
 - Both flowsheet backends (tubafrenzy and Backend-Service)
-- Shared type contracts via `wxyc-shared` (`api.yaml`)
+- Shared type contracts via [`wxyc-shared`](https://github.com/WXYC/wxyc-shared) (`api.yaml`)
 - Authentication and credential management for all connections
 - The management server protocol (WebSocket + HTTP fallback)
 - AzuraCast real-time now-playing via direct WebSocket (Centrifugo)
@@ -38,7 +38,7 @@ Related documents:
 | Term | Definition |
 |------|-----------|
 | **tubafrenzy** | The legacy Java/Tomcat flowsheet system at `www.wxyc.info`. Form-encoded API, 302 redirect responses, `radioShowID` extracted from the Location header. |
-| **Backend-Service** | The new Express/Node.js API at `api.wxyc.org`. JSON API, 200 JSON responses, `Show.id` from the response body. Uses Better Auth for authentication. |
+| **Backend-Service** | The new Express/Node.js API at `api.wxyc.org`. JSON API, 200 JSON responses, `Show.id` from the response body. Uses [Better Auth](https://www.better-auth.com/) for authentication. |
 | **AzuraCast** | The auto DJ and streaming software at `remote.wxyc.org`. Provides a now-playing API. |
 | **Centrifugo** | The real-time messaging server embedded in AzuraCast. Publishes now-playing updates over WebSocket. |
 | **management server** | The server that hosts the WebSocket management channel, heartbeat endpoints, and admin API. Could be Backend-Service or a standalone service. |
@@ -88,7 +88,7 @@ flowchart TD
 
 Dashed lines indicate planned connections not yet implemented. Solid lines are in production today.
 
-**Ethernet mode** (primary): All traffic flows through the W5500 Ethernet Shield with software TLS (SSLClient + BearSSL). The WebSocket to the management server stays open persistently.
+**Ethernet mode** (primary): All traffic flows through the W5500 Ethernet Shield with software TLS ([SSLClient](https://github.com/OPEnSLab-OSU/SSLClient) + [BearSSL](https://bearssl.org/)). The WebSocket to the management server stays open persistently.
 
 **WiFi mode** (fallback): All traffic uses per-call `WiFiSSLClient` instances (destroyed after each request to avoid the Giga R1 global WiFiClient crash bug). No persistent connections. The management channel degrades to HTTP short polling.
 
@@ -124,13 +124,13 @@ This means:
 | Constraint | Detail |
 |-----------|--------|
 | **Network** | UNC campus networks are behind NAT with no inbound port access. The Arduino cannot host a server reachable from outside campus. All remote access must be outbound-initiated. |
-| **Hardware** | Arduino Giga R1 WiFi (STM32H747XI). 1 MB SRAM, 2 MB internal flash, 16 MB QSPI flash. No persistent storage is used today. |
-| **Ethernet** | An Arduino Ethernet Shield 2 (W5500, SPI-based) can be mounted on the Giga R1's Mega-compatible headers. The W5500 has a hardware TCP/IP stack. The studio needs a live Ethernet jack (verify with UNC ITS). |
+| **Hardware** | [Arduino Giga R1 WiFi](https://docs.arduino.cc/hardware/giga-r1-wifi/) ([STM32H747XI](https://www.st.com/en/microcontrollers-microprocessors/stm32h747xi.html)). 1 MB SRAM, 2 MB internal flash, 16 MB QSPI flash. No persistent storage is used today. |
+| **Ethernet** | An [Arduino Ethernet Shield 2](https://docs.arduino.cc/hardware/ethernet-shield-rev2/) (W5500, SPI-based) can be mounted on the Giga R1's Mega-compatible headers. The W5500 has a hardware TCP/IP stack. The studio needs a live Ethernet jack (verify with UNC ITS). |
 | **WiFi** | Built-in WiFi (UNC-PSK, WPA2). `WiFi.begin()` blocks for up to 36 seconds on reconnection (known Giga R1 firmware bug). A global `WiFiSSLClient` crashes the board; the current code creates and destroys one per HTTP call as a workaround. |
-| **TLS** | The W5500 handles TCP but not TLS. Software TLS is required for HTTPS over Ethernet (via `SSLClient` + BearSSL or Mbed TLS). The STM32H747's Cortex-M7 at 480 MHz has ample power for this. `WiFiSSLClient` handles TLS in the WiFi module's firmware and is unaffected. |
+| **TLS** | The W5500 handles TCP but not TLS. Software TLS is required for HTTPS over Ethernet (via `SSLClient` + BearSSL or [Mbed TLS](https://github.com/Mbed-TLS/mbedtls)). The STM32H747's Cortex-M7 at 480 MHz has ample power for this. `WiFiSSLClient` handles TLS in the WiFi module's firmware and is unaffected. |
 | **Existing infra** | The device already makes outbound HTTPS calls to `remote.wxyc.org` (AzuraCast) and `www.wxyc.info` (tubafrenzy). |
 
-**NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The `NTPClient` library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See [Section 3.5](#35-outbound-udp-ntp-time-sync).
+**NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The [`NTPClient`](https://github.com/arduino-libraries/NTPClient) library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See [Section 3.5](#35-outbound-udp-ntp-time-sync).
 
 ### 2.3 Dual-Backend Architecture
 
@@ -151,9 +151,9 @@ The Arduino supports both tubafrenzy and Backend-Service as flowsheet targets. A
 1. **Migration**: When Backend-Service is ready, switch the Arduino to target it. tubafrenzy continues to receive data via the mirror.
 2. **Rollback**: If Backend-Service has a bug that breaks flowsheet writes, switch back to tubafrenzy via the management channel without a reflash. The Arduino resumes writing to tubafrenzy directly. Backend-Service stops receiving entries until the bug is fixed and the Arduino is switched back.
 
-The rollback capability is why `FLOWSHEET_BACKEND` is a runtime parameter (KVStore, after Phase 1) rather than a compile-time-only flag. It requires a restart (not hot-reloadable) because switching backends mid-show would leave the new client without an active show context (Section 6.6).
+The rollback capability is why `FLOWSHEET_BACKEND` is a runtime parameter ([KVStore](https://os.mbed.com/docs/mbed-os/v6.16/apis/kvstore.html), after Phase 1) rather than a compile-time-only flag. It requires a restart (not hot-reloadable) because switching backends mid-show would leave the new client without an active show context (Section 6.6).
 
-**Configuration**: In `config.h`, `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel's `set_config` command (restart required). The flag also determines which credentials and host/port to use.
+**Configuration**: In [`config.h`](../auto-dj-arduino-switch/config.h), `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel's `set_config` command (restart required). The flag also determines which credentials and host/port to use.
 
 See [Section 6](#6-dual-backend-flowsheet-client) for the full dual-backend client specification.
 
@@ -168,7 +168,7 @@ The management server is the remote administration layer for the Arduino. It pro
 | **Heartbeat tracking** | Receive periodic heartbeats from the Arduino (every 30s over WebSocket, every 60s over HTTP). Maintain a `AutoDJDeviceStatus` record with last-seen timestamp, uptime, transport, error counts. Mark the device offline if no heartbeat arrives within 60s. | [Section 3.6.2](#362-message-types), [3.7](#37-http-fallback-management-polling-wifi) |
 | **Command dispatch** | Accept commands from the admin UI (`pause`, `resume`, `end_show`, `set_config`, `restart`, `ping`), enqueue them, and deliver them to the Arduino over WebSocket or HTTP poll. Track pending commands until acknowledged. | [Section 3.6.3](#363-supported-commands), [3.8](#38-server-side-endpoints) |
 | **Acknowledgment processing** | Receive acks from the Arduino confirming command execution. Dequeue the command, update status. Surface errors to the admin UI. | [Section 3.6.2](#362-message-types) |
-| **Error report relay** | Receive structured error reports from the Arduino and forward them to Sentry or another error tracking service. Alert on `fatal`-level errors. | [Section 3.6.2](#362-message-types) |
+| **Error report relay** | Receive structured error reports from the Arduino and forward them to [Sentry](https://sentry.io/) or another error tracking service. Alert on `fatal`-level errors. | [Section 3.6.2](#362-message-types) |
 | **Credential rotation** | Push new API keys or Backend-Service PATs to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | [Section 4.6](#46-credential-rotation-protocol) |
 | **Admin API** | Expose device status and command endpoints to the admin UI, authenticated via Better Auth (session cookies or JWT, `stationManager` role). | [Section 3.8](#38-server-side-endpoints), [4.5](#45-management-server-auth-admin-facing) |
 
@@ -201,7 +201,7 @@ AzuraCast exposes now-playing data through two interfaces. The Arduino uses both
 | **Static HTTP** | HTTPS GET | `/api/nowplaying_static/main.json` | Up to 20s (poll interval) | Both (WiFi + Ethernet) | **Live** |
 | **Centrifugo WebSocket** | WSS | `/api/live/nowplaying/websocket` | Near-real-time (push) | Ethernet only | Planned |
 
-Both interfaces are **public** -- no authentication required. Both return the same logical data (`sh_id`, `artist`, `title`, `album`, `is_live`). The ArduinoJson filter document is identical for both. The `AzuraCastClient` consumes the same fields regardless of source.
+Both interfaces are **public** -- no authentication required. Both return the same logical data (`sh_id`, `artist`, `title`, `album`, `is_live`). The [ArduinoJson](https://arduinojson.org/) filter document is identical for both. The `AzuraCastClient` consumes the same fields regardless of source.
 
 **Dual-mode strategy** ([Section 3.9.2](#392-dual-mode-architecture)):
 
@@ -231,7 +231,7 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 
 **Deployment**: Not yet decided. Options include:
 
-- A page within dj-site (already uses Better Auth, already deployed to Cloudflare Pages)
+- A page within [dj-site](https://github.com/WXYC/dj-site) (already uses Better Auth, already deployed to Cloudflare Pages)
 - A standalone single-page app
 - A server-rendered page served by Backend-Service itself
 
@@ -265,7 +265,7 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 
 ### 3.2 Outbound HTTP: AzuraCast Now Playing
 
-**Status**: Live (implemented in `azuracast_client.cpp`)
+**Status**: Live (implemented in [`azuracast_client.cpp`](../auto-dj-arduino-switch/azuracast_client.cpp))
 
 The Arduino polls AzuraCast's static now-playing endpoint to detect track changes.
 
@@ -302,9 +302,9 @@ filter["live"]["is_live"] = true;
 
 ### 3.3 Outbound HTTP: tubafrenzy Flowsheet Operations
 
-**Status**: Live (implemented in `flowsheet_client.cpp`)
+**Status**: Live (implemented in [`flowsheet_client.cpp`](../auto-dj-arduino-switch/flowsheet_client.cpp))
 
-All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success (the servlet redirects to a JSP page, but the Arduino does not follow the redirect). `ArduinoHttpClient` does not follow redirects by default, which is the desired behavior.
+All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success (the servlet redirects to a JSP page, but the Arduino does not follow the redirect). [`ArduinoHttpClient`](https://github.com/arduino-libraries/ArduinoHttpClient) does not follow redirects by default, which is the desired behavior.
 
 #### 3.3.1 Start Show
 
@@ -324,7 +324,7 @@ All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-K
 | `djName` | `"Auto DJ"` | `AUTO_DJ_NAME` in `config.h` (URL-encoded) |
 | `djHandle` | `"AutoDJ"` | `AUTO_DJ_HANDLE` in `config.h` (URL-encoded) |
 | `showName` | `"Auto DJ"` | `AUTO_DJ_SHOW_NAME` in `config.h` (URL-encoded) |
-| `startingHour` | epoch milliseconds | `currentHourMs()` from `utils.cpp` |
+| `startingHour` | epoch milliseconds | `currentHourMs()` from [`utils.cpp`](../auto-dj-arduino-switch/utils.cpp) |
 
 **Response handling**: Parse `radioShowID` from the Location header using `parseRadioShowID()` (in `utils.cpp`). Returns -1 on failure.
 
@@ -899,7 +899,7 @@ stateDiagram-v2
 
 #### 3.9.3 Why Direct (Not Relayed)
 
-The original design (see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details)) assumed the Arduino could not subscribe to Centrifugo directly, requiring the management server to act as a relay. This assumption was wrong: AzuraCast's Centrifugo endpoint uses standard WebSocket with a simple JSON subscription message and no authentication. The Arduino can connect directly using the `ArduinoWebsockets` library.
+The original design (see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details)) assumed the Arduino could not subscribe to Centrifugo directly, requiring the management server to act as a relay. This assumption was wrong: AzuraCast's Centrifugo endpoint uses standard WebSocket with a simple JSON subscription message and no authentication. The Arduino can connect directly using the [`ArduinoWebsockets`](https://github.com/gilmaimon/ArduinoWebsockets) library.
 
 Direct subscription is simpler:
 
@@ -939,7 +939,7 @@ See [Appendix B](#appendix-b-azuracast-centrifugo-integration-details) for the r
 
 | Credential | Stored in | Authenticates to | Rotation frequency |
 |-----------|----------|------------------|-------------------|
-| WiFi password (`WIFI_PASS`) | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | UNC-PSK WiFi network | Annually (UNC policy) |
+| WiFi password (`WIFI_PASS`) | [`secrets.h`](../auto-dj-arduino-switch/secrets.h) (compile-time), KVStore (runtime, after Phase 1) | UNC-PSK WiFi network | Annually (UNC policy) |
 | tubafrenzy API key (`AUTO_DJ_API_KEY`) | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | tubafrenzy flowsheet API | Manual (operator-initiated) |
 | Backend-Service PAT | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | Backend-Service flowsheet API | Manual (operator-initiated, or via management server push) |
 | Management server key | Same as `AUTO_DJ_API_KEY` (shared) | Management server WebSocket + HTTP | Same as tubafrenzy API key |
@@ -1150,12 +1150,12 @@ This ensures that a bad credential push doesn't permanently brick the WiFi fallb
 
 The `api.yaml` file in `wxyc-shared` is the single source of truth for API types. Code generation produces:
 
-- **TypeScript** (`openapi-generator-cli` → `src/generated/models/`): consumed by Backend-Service, dj-site, management server, admin UI
-- **Python** (`datamodel-codegen` → Pydantic v2): consumed by request-o-matic, library-metadata-lookup
-- **Swift**: consumed by wxyc-ios-64 (via existing code generation pipeline)
-- **Kotlin**: consumed by WXYC-Android (via existing code generation pipeline)
+- **TypeScript** ([`openapi-generator-cli`](https://openapi-generator.tech/) → `src/generated/models/`): consumed by Backend-Service, dj-site, management server, admin UI
+- **Python** ([`datamodel-codegen`](https://github.com/koxudaxi/datamodel-code-generator) → Pydantic v2): consumed by [request-o-matic](https://github.com/WXYC/request-o-matic), [library-metadata-lookup](https://github.com/WXYC/library-metadata-lookup)
+- **Swift**: consumed by [wxyc-ios-64](https://github.com/WXYC/wxyc-ios-64) (via existing code generation pipeline)
+- **Kotlin**: consumed by [WXYC-Android](https://github.com/WXYC/WXYC-Android) (via existing code generation pipeline)
 
-The `tsup` build produces independently importable entry points:
+The [`tsup`](https://tsup.egoist.dev/) build produces independently importable entry points:
 
 | Entry point | Import path | Contents |
 |-------------|------------|----------|
@@ -1582,7 +1582,7 @@ A follow-up PR to each mobile app is needed to handle this field (e.g., filterin
 
 OpenAPI 3.0 doesn't natively describe WebSocket protocols. The schemas are added to `api.yaml` as `components/schemas` only (no path definitions for WebSocket messages). The message direction and lifecycle are documented in prose with Mermaid sequence diagrams ([Section 3.6](#36-websocket-management-channel)).
 
-If a formal WebSocket contract is needed later, AsyncAPI 2.x can reference these same schemas. For now, the WebSocket has exactly one consumer (the Arduino), and the prose documentation is sufficient.
+If a formal WebSocket contract is needed later, [AsyncAPI](https://www.asyncapi.com/) 2.x can reference these same schemas. For now, the WebSocket has exactly one consumer (the Arduino), and the prose documentation is sufficient.
 
 ---
 
@@ -1611,7 +1611,7 @@ The flag also determines:
 
 ### 6.2 tubafrenzy Client (existing)
 
-Implemented in `flowsheet_client.cpp` and `flowsheet_client.h`. See [Section 3.3](#33-outbound-http-tubafrenzy-flowsheet-operations) for the full protocol specification.
+Implemented in `flowsheet_client.cpp` and [`flowsheet_client.h`](../auto-dj-arduino-switch/flowsheet_client.h). See [Section 3.3](#33-outbound-http-tubafrenzy-flowsheet-operations) for the full protocol specification.
 
 Three operations:
 
@@ -1907,7 +1907,7 @@ Add `localEpoch(utcEpochSeconds)` that applies `UTC_OFFSET_SECONDS + (isDST ? 36
 
 | File | Change |
 |------|--------|
-| `utils.h` / `utils.cpp` | Add `isDST()` and `localEpoch()`; `currentHourMs()` unchanged |
+| [`utils.h`](../auto-dj-arduino-switch/utils.h) / `utils.cpp` | Add `isDST()` and `localEpoch()`; `currentHourMs()` unchanged |
 | `config.h` | Optionally add `DST_ENABLED` flag (default `true`) |
 | `test/test_dst.cpp` | Parameterized boundary tests |
 
@@ -1980,8 +1980,8 @@ At boot, the firmware reads from KVStore. If a key is missing (first boot), it f
 |------|--------|
 | `config_store.h` / `config_store.cpp` | New module: KVStore wrapper with `load()`, `save(key)`, `reset()` |
 | `config.h` | Compile-time values become defaults only |
-| `auto-dj-arduino-switch.ino` | Load config at boot; pass `RuntimeConfig` to modules |
-| `wifi_manager.h` / `flowsheet_client.h` / `azuracast_client.h` | Accept config struct instead of raw strings |
+| [`auto-dj-arduino-switch.ino`](../auto-dj-arduino-switch/auto-dj-arduino-switch.ino) | Load config at boot; pass `RuntimeConfig` to modules |
+| [`wifi_manager.h`](../auto-dj-arduino-switch/wifi_manager.h) / `flowsheet_client.h` / [`azuracast_client.h`](../auto-dj-arduino-switch/azuracast_client.h) | Accept config struct instead of raw strings |
 
 ### 7.3 Phase 2: Ethernet Shield Integration
 
@@ -2003,7 +2003,7 @@ The shield also has an SD card slot (CS on D4), which can be ignored or used for
 | Library | Approach | Tradeoffs |
 |---------|----------|-----------|
 | **SSLClient** (OPEnSLab-NGO) | BearSSL wrapper over any Arduino `Client` | Drop-in replacement for `WiFiSSLClient`; well-tested; needs trust anchors (root CA certs) compiled in |
-| **Mbed TLS** (native) | `mbedtls_ssl_*` API directly | Already in Mbed OS; more flexible; lower-level API, more code to write |
+| **Mbed TLS** (native) | `mbedtls_ssl_*` API directly | Already in [Mbed OS](https://os.mbed.com/mbed-os/); more flexible; lower-level API, more code to write |
 
 `SSLClient` is the pragmatic choice. It wraps `EthernetClient` the same way `WiFiSSLClient` wraps the WiFi module's TLS:
 
@@ -2085,7 +2085,7 @@ The per-call client creation pattern is preserved. Over Ethernet this is unneces
 |------|--------|
 | `network_manager.h` / `network_manager.cpp` | New: dual-transport manager with failover |
 | `ethernet_transport.h` / `ethernet_transport.cpp` | New: W5500 + SSLClient setup |
-| `wifi_manager.h` / `wifi_manager.cpp` | Refactor into `wifi_transport.h/.cpp` |
+| `wifi_manager.h` / [`wifi_manager.cpp`](../auto-dj-arduino-switch/wifi_manager.cpp) | Refactor into `wifi_transport.h/.cpp` |
 | `azuracast_client.h/.cpp` | Accept `NetworkManager&` |
 | `flowsheet_client.h/.cpp` | Accept `NetworkManager&` |
 | `auto-dj-arduino-switch.ino` | Replace `WifiManager` with `NetworkManager` |
