@@ -8,7 +8,7 @@ This document specifies all network communication for WXYC's auto-DJ system -- h
 
 WXYC's auto-DJ system bridges AzuraCast (the streaming/auto-DJ software) with the station's flowsheet. When no human DJ is on air, AzuraCast plays tracks automatically. This system detects those tracks and logs them to the flowsheet so the station's playlist archive stays complete.
 
-The **auto-DJ module in Backend-Service** is the central actor: it subscribes to AzuraCast's now-playing feed, writes entries to PostgreSQL, and mirrors them to tubafrenzy. A **virtual switch in dj-site** lets DJs activate and deactivate auto-DJ mode with explicit human confirmation. The **Arduino** remains relevant as an optional relay state reporter and management target, but it no longer makes flowsheet decisions or polls AzuraCast directly.
+A **standalone auto-DJ orchestrator service** subscribes to AzuraCast's now-playing feed and writes entries to the flowsheet. A `FLOWSHEET_BACKEND` flag determines the target: when set to `BACKEND_SERVICE`, it writes to Backend-Service's API and mirrors to tubafrenzy; when set to `TUBAFRENZY`, it writes to tubafrenzy only. A **virtual switch in dj-site** lets DJs activate and deactivate auto-DJ mode with explicit human confirmation. The **Arduino** remains relevant as an optional relay state reporter and management target, but it no longer makes flowsheet decisions or polls AzuraCast directly.
 
 This document is the single source of truth for all network traffic in this system.
 
@@ -32,7 +32,7 @@ This revision relocates auto-DJ logic to Backend-Service and introduces a virtua
 
 This document covers:
 
-- The auto-DJ module in Backend-Service (AzuraCast subscription, flowsheet pipeline, mirror to tubafrenzy)
+- The auto-DJ orchestrator (AzuraCast subscription, flowsheet pipeline, mirror to tubafrenzy)
 - The virtual switch activation flow (dj-site → Backend-Service)
 - Conflict resolution between auto-DJ and live DJs
 - The auto-DJ system user identity and authentication
@@ -54,13 +54,13 @@ Related documents:
 | Term | Definition |
 |------|-----------|
 | **tubafrenzy** | The legacy Java/Tomcat flowsheet system at `www.wxyc.info`. Form-encoded API, 302 redirect responses, `radioShowID` extracted from the Location header. |
-| **Backend-Service** | The new Express/Node.js API at `api.wxyc.org`. JSON API, 200 JSON responses, `Show.id` from the response body. Uses [Better Auth](https://www.better-auth.com/) for authentication. Hosts the auto-DJ module. |
-| **auto-DJ module** | The component within Backend-Service that subscribes to AzuraCast, detects track changes, writes flowsheet entries, and mirrors them to tubafrenzy. Activated and deactivated via the virtual switch API. |
-| **virtual switch** | A toggle in dj-site that lets DJs activate or deactivate auto-DJ mode. Requires explicit human confirmation. Maps to `POST /auto-dj/activate` and `POST /auto-dj/deactivate`. |
-| **mirror middleware** | The component within Backend-Service that replicates flowsheet entries to tubafrenzy's MySQL database via SSH tunnel. Ensures both databases stay in sync during the migration. |
+| **Backend-Service** | The new Express/Node.js API at `api.wxyc.org`. JSON API, 200 JSON responses, `Show.id` from the response body. Uses [Better Auth](https://www.better-auth.com/) for authentication. |
+| **auto-DJ orchestrator** | A standalone service that subscribes to AzuraCast, detects track changes, and writes flowsheet entries. A `FLOWSHEET_BACKEND` flag determines the target: `BACKEND_SERVICE` (write to Backend-Service API + mirror to tubafrenzy) or `TUBAFRENZY` (write to tubafrenzy API only). Deployed independently (e.g., Railway). Also hosts the Arduino management server. |
+| **virtual switch** | A toggle in dj-site that lets DJs activate or deactivate auto-DJ mode. Requires explicit human confirmation. Calls the orchestrator's activation API. |
+| **mirror** | When `FLOWSHEET_BACKEND=BACKEND_SERVICE`, the orchestrator writes to Backend-Service's API and also mirrors entries to tubafrenzy so the legacy database stays complete. When `FLOWSHEET_BACKEND=TUBAFRENZY`, entries go to tubafrenzy only. |
 | **AzuraCast** | The auto DJ and streaming software at `remote.wxyc.org`. Provides a now-playing API. |
 | **Centrifugo** | The real-time messaging server embedded in AzuraCast. Publishes now-playing updates over WebSocket. |
-| **management server** | The component within Backend-Service that hosts the WebSocket management channel, heartbeat endpoints, and admin API for Arduino device management. |
+| **management server** | The component within the auto-DJ orchestrator that hosts the WebSocket management channel, heartbeat endpoints, and admin API for Arduino device management. |
 | **flowsheet** | The station's playback log -- a record of every song played during a show. |
 | **`sh_id`** | AzuraCast's song history ID. A monotonically increasing integer unique per play event. Used to detect track changes. |
 | **`radioShowID`** | tubafrenzy's show identifier. An integer extracted from the Location header after starting a show. |
@@ -74,7 +74,7 @@ Related documents:
 
 ### 2.1 Network Topology
 
-Backend-Service is the central actor for auto-DJ logic. It subscribes to AzuraCast for now-playing data, writes entries to its own PostgreSQL database, and mirrors them to tubafrenzy. DJs interact via dj-site (or tubafrenzy directly for legacy workflows). The Arduino is an optional relay state reporter and management target.
+The auto-DJ orchestrator is a standalone service that subscribes to AzuraCast for now-playing data and writes entries to the flowsheet. A `FLOWSHEET_BACKEND` flag determines the target: when set to `BACKEND_SERVICE`, it writes to Backend-Service's API and mirrors to tubafrenzy; when set to `TUBAFRENZY`, it writes to tubafrenzy only. The orchestrator also hosts the Arduino management server. The Arduino is an optional relay state reporter.
 
 ```mermaid
 flowchart TD
@@ -83,14 +83,20 @@ flowchart TD
         DJ2["DJ using tubafrenzy<br>(wxyc.info)"]
     end
 
+    subgraph Orchestrator["Auto-DJ Orchestrator (standalone)"]
+        ORCH["AzuraCast Subscription<br>+ Flowsheet Writer<br>+ Arduino Mgmt Server"]
+    end
+
     subgraph Backend["Backend-Service (api.wxyc.org)"]
-        API["Flowsheet API<br>+ Auto-DJ Module"]
+        API["Flowsheet API"]
         PG["PostgreSQL"]
-        MIRROR["Mirror Middleware"]
+    end
+
+    subgraph Legacy["tubafrenzy (wxyc.info)"]
+        TF["Flowsheet API<br>+ Web UI<br>MySQL"]
     end
 
     subgraph External["External"]
-        TF["tubafrenzy<br>(wxyc.info)<br>MySQL + Web UI"]
         AZ["AzuraCast<br>(remote.wxyc.org)<br>Now Playing API +<br>Centrifugo WebSocket"]
     end
 
@@ -98,15 +104,17 @@ flowchart TD
         ARD["Arduino Giga R1 WiFi<br>+ Ethernet Shield"]
     end
 
-    DJ1 -->|"toggle Auto DJ<br>+ normal flowsheet"| API
+    DJ1 -->|"toggle Auto DJ"| ORCH
+    DJ1 -->|"normal flowsheet"| API
     DJ2 -->|"web UI"| TF
     API -->|"writes entries"| PG
-    MIRROR -->|"SSH → MySQL"| TF
 
-    API -->|"WSS Centrifugo<br>now-playing push"| AZ
-    API -->|"HTTPS GET poll<br>every 20s<br>(fallback)"| AZ
+    ORCH -->|"WSS Centrifugo<br>now-playing push"| AZ
+    ORCH -->|"HTTPS GET poll<br>every 20s (fallback)"| AZ
+    ORCH -->|"HTTPS POST<br>JSON + Bearer token<br>(flag: BACKEND_SERVICE)"| API
+    ORCH -->|"HTTPS POST<br>form-encoded<br>(mirror or flag: TUBAFRENZY)"| TF
 
-    ARD -.->|"reports relay state<br>(advisory signal)"| API
+    ARD -.->|"reports relay state<br>+ heartbeats"| ORCH
 ```
 
 Dashed lines indicate optional connections. The Arduino is not required for auto-DJ operation -- the virtual switch in dj-site is the authoritative activation mechanism.
@@ -147,7 +155,7 @@ sequenceDiagram
 2. dj-site sends `POST /auto-dj/activate` to Backend-Service.
 3. Backend-Service validates that the DJ has `flowsheet:write` permission.
 4. Backend-Service starts an auto-DJ show using the auto-DJ system user as `primary_dj_id`.
-5. Backend-Service subscribes to AzuraCast's Centrifugo WebSocket (primary) or starts HTTP polling (fallback).
+5. The orchestrator subscribes to AzuraCast's Centrifugo WebSocket (primary) or starts HTTP polling (fallback).
 6. Track changes flow through the flowsheet pipeline: PostgreSQL write + tubafrenzy mirror.
 
 **Deactivation flow**:
@@ -191,15 +199,15 @@ The auto-DJ system operates as a dedicated Better Auth user account, not an anon
 | **Role** | `dj` (grants `flowsheet:write` permission) |
 | **DJ name** | `Auto DJ` |
 | **`is_automation`** | `true` (distinguishes automation from human DJs in admin UIs and mobile apps) |
-| **Auth mechanism** | Personal Access Token (PAT) via Better Auth's bearer plugin, used internally by the auto-DJ module |
+| **Auth mechanism** | Personal Access Token (PAT) via Better Auth's bearer plugin, used by the orchestrator when targeting Backend-Service |
 
-The auto-DJ system user is created once by an admin ([Section 4.3](#43-auto-dj-system-identity-set-up)). The auto-DJ module in Backend-Service uses this identity when calling the flowsheet API internally -- it goes through the same validation and authorization as any DJ.
+The auto-DJ system user is created once by an admin ([Section 4.3](#43-auto-dj-system-identity-set-up)). The auto-DJ orchestrator uses this identity when calling the flowsheet API internally -- it goes through the same validation and authorization as any DJ.
 
 ### 2.5 AzuraCast Now-Playing Subscription
 
-AzuraCast is the auto DJ and streaming software at `remote.wxyc.org`. Its role in the revised architecture is unchanged: it answers *what song is playing right now?* What changes is the **consumer** -- Backend-Service subscribes to AzuraCast instead of the Arduino.
+AzuraCast is the auto DJ and streaming software at `remote.wxyc.org`. Its role in the revised architecture is unchanged: it answers *what song is playing right now?* What changes is the **consumer** -- the orchestrator subscribes to AzuraCast instead of the Arduino.
 
-AzuraCast exposes now-playing data through two interfaces. Backend-Service uses both as mutually exclusive modes:
+AzuraCast exposes now-playing data through two interfaces. The orchestrator uses both as mutually exclusive modes:
 
 | Interface | Protocol | Endpoint | Latency | Status |
 |-----------|----------|----------|---------|--------|
@@ -210,37 +218,57 @@ Both interfaces are **public** -- no authentication required. Both return the sa
 
 **Dual-mode strategy**:
 
-- **Centrifugo WebSocket** (primary): Backend-Service subscribes via `centrifuge-js` (the official Centrifugo JavaScript client for Node.js). Track updates arrive in near-real-time. A 60-second safety-net HTTP poll catches any missed messages.
-- **HTTP polling** (fallback): If the WebSocket connection cannot be established or is lost, Backend-Service falls back to polling the static HTTP endpoint every 20 seconds. This uses a simple `fetch` call with no persistent connections.
+- **Centrifugo WebSocket** (primary): The orchestrator subscribes via `centrifuge-js` (the official Centrifugo JavaScript client for Node.js). Track updates arrive in near-real-time. A 60-second safety-net HTTP poll catches any missed messages.
+- **HTTP polling** (fallback): If the WebSocket connection cannot be established or is lost, the orchestrator falls back to polling the static HTTP endpoint every 20 seconds. This uses a simple `fetch` call with no persistent connections.
 
-The auto-DJ module activates the subscription when `POST /auto-dj/activate` is called and tears it down on deactivation. While inactive, Backend-Service makes no AzuraCast requests.
+The orchestrator activates the subscription when `POST /auto-dj/activate` is called and tears it down on deactivation. While inactive, Backend-Service makes no AzuraCast requests.
 
 **Track change detection**: Compare `sh_id` to the previous value. If different, a new track is playing. Same logic as the original Arduino implementation, now running server-side.
 
-**`is_live` flag**: When `live.is_live` is `true`, AzuraCast reports that a live DJ is streaming. Backend-Service treats this as an advisory signal -- it does not auto-deactivate based on this flag alone, since `is_live` reflects AzuraCast's streamer state, not the flowsheet's show state.
+**`is_live` flag**: When `live.is_live` is `true`, AzuraCast reports that a live DJ is streaming. The orchestrator treats this as an advisory signal -- it does not auto-deactivate based on this flag alone, since `is_live` reflects AzuraCast's streamer state, not the flowsheet's show state.
 
 See [Section 3.2](#32-azuracast-now-playing-http-polling) for the HTTP polling protocol and [Section 3.3](#33-azuracast-centrifugo-websocket) for the Centrifugo WebSocket protocol.
 
 ### 2.6 Dual-Database Architecture
 
-During the migration from tubafrenzy to Backend-Service, auto-DJ entries must reach both databases. Backend-Service handles this via **mirror middleware** -- the auto-DJ module writes to PostgreSQL through the normal flowsheet API, and the mirror middleware replicates each write to tubafrenzy's MySQL database.
+The orchestrator supports both flowsheet backends. A `FLOWSHEET_BACKEND` config flag determines the target:
+
+| Flag | Primary target | Mirror target | Description |
+|------|---------------|---------------|-------------|
+| `BACKEND_SERVICE` | Backend-Service API → PostgreSQL | tubafrenzy API → MySQL | Write to Backend-Service; also mirror to tubafrenzy so the legacy database stays complete |
+| `TUBAFRENZY` | tubafrenzy API → MySQL | (none) | Write to tubafrenzy only (current production behavior, minus the Arduino) |
 
 ```mermaid
 flowchart LR
-    AutoDJ["Auto-DJ Module"] -->|"POST /flowsheet<br>(internal)"| API["Flowsheet API"]
-    API -->|"INSERT"| PG["PostgreSQL"]
-    API -->|"trigger"| Mirror["Mirror Middleware"]
-    Mirror -->|"SSH tunnel →<br>MySQL INSERT"| TF["tubafrenzy MySQL"]
+    subgraph Orchestrator
+        ORCH["Auto-DJ Orchestrator"]
+    end
+
+    subgraph BS_Mode["Flag: BACKEND_SERVICE"]
+        BS_API["Backend-Service API"] -->|"INSERT"| PG["PostgreSQL"]
+        TF_MIRROR["tubafrenzy API<br>(mirror)"] -->|"INSERT"| TF_DB1["MySQL"]
+    end
+
+    subgraph TF_Mode["Flag: TUBAFRENZY"]
+        TF_API["tubafrenzy API"] -->|"INSERT"| TF_DB2["MySQL"]
+    end
+
+    ORCH -->|"JSON + Bearer token"| BS_API
+    ORCH -->|"form-encoded +<br>X-Auto-DJ-Key"| TF_MIRROR
+    ORCH -->|"form-encoded +<br>X-Auto-DJ-Key"| TF_API
 ```
 
-| | PostgreSQL (Backend-Service) | MySQL (tubafrenzy) |
-|--|-----|------|
-| **Write path** | Direct via flowsheet API | Mirror middleware (SSH → MySQL) |
-| **Show management** | `POST /flowsheet/join`, `POST /flowsheet/end` | Mirror creates/ends corresponding show |
-| **DJ identity** | Auto-DJ system user (`dj_id` from DJ table) | `djID=0` (tubafrenzy's convention for auto-DJ) |
-| **Breakpoints** | Auto-DJ module inserts explicit breakpoint entries at hour boundaries | Mirror sets `autoBreakpoint=true` so tubafrenzy's server handles breakpoints via `FlowsheetEntryService.createEntryWithAutoBreakpoints()` |
+| | Backend-Service | tubafrenzy |
+|--|----------------|-----------|
+| **Content type** | `application/json` | `application/x-www-form-urlencoded` |
+| **Auth** | `Authorization: Bearer <PAT>` | `X-Auto-DJ-Key` header |
+| **Start show** | `POST /flowsheet/join` → 200 JSON | `POST /playlists/startRadioShow` → 302 |
+| **Add entry** | `POST /flowsheet` → 200 JSON | `POST /playlists/flowsheetEntryAdd` → 302 |
+| **End show** | `POST /flowsheet/end` → 200 JSON | `POST /playlists/finishRadioShow` → 302 |
+| **Breakpoints** | Orchestrator inserts explicit breakpoint entries at hour boundaries | `autoBreakpoint=true` lets the server handle breakpoints |
+| **DJ identity** | Auto-DJ system user (`dj_id` from DJ table) | `djID=0` (tubafrenzy convention) |
 
-The Arduino no longer writes to either database directly. All flowsheet writes go through Backend-Service, which handles both targets.
+The Arduino no longer writes to either database. All flowsheet writes go through the orchestrator.
 
 ### 2.7 Arduino Device Role
 
@@ -248,9 +276,9 @@ The Arduino's role is narrowed from the original design. It is now an **optional
 
 | Responsibility | Before (original design) | After (revised) |
 |----------------|------------------------|-----------------|
-| **Detect relay state** | Primary trigger for auto-DJ activation | Advisory signal reported to Backend-Service |
-| **Poll AzuraCast** | Arduino polls HTTP / subscribes to Centrifugo | Backend-Service subscribes |
-| **Write flowsheet entries** | Arduino POSTs to tubafrenzy / Backend-Service | Backend-Service writes (Arduino does not) |
+| **Detect relay state** | Primary trigger for auto-DJ activation | Advisory signal reported to the orchestrator |
+| **Poll AzuraCast** | Arduino polls HTTP / subscribes to Centrifugo | Orchestrator subscribes |
+| **Write flowsheet entries** | Arduino POSTs to tubafrenzy / Backend-Service | Orchestrator writes (Arduino does not) |
 | **Start/end shows** | Arduino manages show lifecycle | Backend-Service manages show lifecycle |
 | **Remote management** | Planned (heartbeats, commands) | Unchanged -- Arduino reports status, accepts commands |
 
@@ -260,7 +288,7 @@ The Arduino's role is narrowed from the original design. It is now an **optional
 2. **Accepts management commands**: Heartbeats, config updates (`set_config`), `restart`, and `ping` via the management server ([Section 2.8](#28-management-server)).
 3. **Runs LED indicators**: Shows the current state (relay on/off, network status) on the studio hardware.
 
-**When the Arduino is unavailable**: The auto-DJ system functions normally without the Arduino. DJs activate auto-DJ via the virtual switch. Backend-Service subscribes to AzuraCast. Entries flow to both databases. The only loss is the advisory relay state signal.
+**When the Arduino is unavailable**: The auto-DJ system functions normally without the Arduino. DJs activate auto-DJ via the virtual switch. The orchestrator subscribes to AzuraCast. Entries flow to the configured backend(s). The only loss is the advisory relay state signal.
 
 #### Arduino Transport Strategy
 
@@ -283,9 +311,9 @@ See [Section 7.4](#74-phase-3-arduino-hardware-integration) for the Arduino-spec
 
 ### 2.8 Management Server
 
-The management server is the remote administration layer for the Arduino. It provides device visibility (is the Arduino alive? what's its relay state?), remote control (`set_config`, `restart`, `ping`), and credential rotation -- without physical access to the studio. It is hosted within Backend-Service.
+The management server is the remote administration layer for the Arduino. It provides device visibility (is the Arduino alive? what's its relay state?), remote control (`set_config`, `restart`, `ping`), and credential rotation -- without physical access to the studio. It is hosted within the auto-DJ orchestrator service.
 
-The management server is **separate from the auto-DJ module**. The auto-DJ module handles AzuraCast subscription, flowsheet writing, and show lifecycle. The management server handles Arduino device management. They share the same Backend-Service process but are distinct concerns.
+The management server is a component of the orchestrator -- both the AzuraCast subscription/flowsheet logic and the Arduino management server live in the same service. This keeps all auto-DJ concerns in one place.
 
 **Responsibilities**:
 
@@ -348,7 +376,7 @@ The admin UI provides two control surfaces:
 
 ### 3.1 Traffic Summary Table
 
-Traffic is organized by actor: Backend-Service (the auto-DJ module), the Arduino (optional relay reporter), dj-site (virtual switch), and the admin UI.
+Traffic is organized by actor: Backend-Service (the orchestrator), the Arduino (optional relay reporter), dj-site (virtual switch), and the admin UI.
 
 #### Backend-Service Traffic
 
@@ -394,7 +422,7 @@ Traffic is organized by actor: Backend-Service (the auto-DJ module), the Arduino
 | 18 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | **Live** (to be removed) |
 | 19 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | **Live** (to be removed) |
 
-The legacy Arduino traffic (rows 16-19) represents the current production behavior where the Arduino directly polls AzuraCast and writes to tubafrenzy. This will be superseded by the Backend-Service auto-DJ module. The Arduino will continue to function with this firmware until the Backend-Service module is deployed, at which point the Arduino firmware will be updated to remove flowsheet writing and AzuraCast polling, retaining only relay state reporting and management.
+The legacy Arduino traffic (rows 16-19) represents the current production behavior where the Arduino directly polls AzuraCast and writes to tubafrenzy. This will be superseded by the auto-DJ orchestrator. The Arduino will continue to function with this firmware until the Backend-Service module is deployed, at which point the Arduino firmware will be updated to remove flowsheet writing and AzuraCast polling, retaining only relay state reporting and management.
 
 ---
 
@@ -402,9 +430,9 @@ The legacy Arduino traffic (rows 16-19) represents the current production behavi
 
 ### 3.2 AzuraCast Now-Playing: HTTP Polling
 
-**Consumer**: Backend-Service auto-DJ module (replaces the Arduino as consumer)
+**Consumer**: auto-DJ orchestrator (replaces the Arduino as consumer)
 
-The auto-DJ module polls AzuraCast's static now-playing endpoint to detect track changes. This is the fallback mode when the Centrifugo WebSocket is unavailable.
+The orchestrator polls AzuraCast's static now-playing endpoint to detect track changes. This is the fallback mode when the Centrifugo WebSocket is unavailable.
 
 | Field | Value |
 |-------|-------|
@@ -430,7 +458,7 @@ The auto-DJ module polls AzuraCast's static now-playing endpoint to detect track
 
 ### 3.3 AzuraCast Centrifugo WebSocket
 
-**Consumer**: Backend-Service auto-DJ module (replaces the Arduino as consumer)
+**Consumer**: auto-DJ orchestrator (replaces the Arduino as consumer)
 
 AzuraCast embeds a [Centrifugo](https://centrifugal.dev/) real-time messaging server and exposes a public WebSocket endpoint for now-playing updates.
 
@@ -485,7 +513,7 @@ These are the same fields extracted by the HTTP polling endpoint ([Section 3.2](
 
 #### 3.3.2 Dual-Mode Architecture
 
-The auto-DJ module uses the Centrifugo WebSocket as the primary subscription and HTTP polling as the fallback. These are mutually exclusive modes -- the module uses one or the other, not both simultaneously (except for a safety-net poll).
+The orchestrator uses the Centrifugo WebSocket as the primary subscription and HTTP polling as the fallback. These are mutually exclusive modes -- the module uses one or the other, not both simultaneously (except for a safety-net poll).
 
 ```mermaid
 stateDiagram-v2
@@ -496,15 +524,15 @@ stateDiagram-v2
 
     state PushMode {
         [*] --> Listening
-        Listening: Backend-Service receives now_playing<br/>via Centrifugo WebSocket<br/>near-real-time updates
+        Listening: Orchestrator receives now_playing<br/>via Centrifugo WebSocket<br/>near-real-time updates
         Listening --> SafetyPoll: 60s since last push
-        SafetyPoll: Backend-Service polls AzuraCast HTTP API<br/>as a safety net
+        SafetyPoll: Orchestrator polls AzuraCast HTTP API<br/>as a safety net
         SafetyPoll --> Listening: WebSocket message received
     }
 
     state PollMode {
         [*] --> Polling
-        Polling: Backend-Service polls AzuraCast HTTP API<br/>GET /api/nowplaying_static/main.json<br/>every 20s
+        Polling: Orchestrator polls AzuraCast HTTP API<br/>GET /api/nowplaying_static/main.json<br/>every 20s
     }
 
     PushMode --> PollMode: WebSocket disconnected<br/>(after retry exhaustion)
@@ -513,8 +541,8 @@ stateDiagram-v2
     PollMode --> Inactive: deactivate()
 ```
 
-- **Push mode** (primary): Backend-Service subscribes via `centrifuge-js`. Track updates arrive in near-real-time. A 60-second safety-net HTTP poll catches any missed messages.
-- **Poll mode** (fallback): Backend-Service polls the static HTTP endpoint every 20 seconds. Simple `fetch` call, no persistent connections.
+- **Push mode** (primary): The orchestrator subscribes via `centrifuge-js`. Track updates arrive in near-real-time. A 60-second safety-net HTTP poll catches any missed messages.
+- **Poll mode** (fallback): The orchestrator polls the static HTTP endpoint every 20 seconds. Simple `fetch` call, no persistent connections.
 
 #### 3.3.3 Reconnection
 
@@ -524,7 +552,7 @@ stateDiagram-v2
 
 **Status**: Planned (Phase 1)
 
-The auto-DJ activation API is the control plane for starting and stopping the auto-DJ module. It is called by the virtual switch in dj-site.
+The auto-DJ activation API is the control plane for starting and stopping the orchestrator. It is called by the virtual switch in dj-site.
 
 #### 3.4.1 Activate
 
@@ -641,7 +669,7 @@ The `relay_state` field reflects the most recent advisory signal from the Arduin
 
 ### 3.5 Flowsheet Write Pipeline
 
-When the auto-DJ module detects a track change (new `sh_id` from AzuraCast), it writes the entry to both databases through the normal flowsheet API pipeline.
+When the orchestrator detects a track change (new `sh_id` from AzuraCast), it writes the entry to both databases through the normal flowsheet API pipeline.
 
 ```mermaid
 sequenceDiagram
@@ -660,11 +688,11 @@ sequenceDiagram
     API-->>AutoDJ: 200 OK
 ```
 
-**Internal call**: The auto-DJ module calls the flowsheet API internally within the same Backend-Service process. This goes through the same validation, authorization, and middleware as external API calls, ensuring consistency. The auto-DJ system user's PAT authenticates the internal call.
+**External call**: The orchestrator calls Backend-Service's flowsheet API (or tubafrenzy's API) over HTTPS, depending on the `FLOWSHEET_BACKEND` flag. The auto-DJ system user's PAT authenticates requests to Backend-Service.
 
 **Mirror middleware**: The mirror replicates each write to tubafrenzy. It translates the JSON flowsheet entry into tubafrenzy's form-encoded format, including `autoBreakpoint=true` so tubafrenzy handles hourly breakpoints via its `FlowsheetEntryService.createEntryWithAutoBreakpoints()` method.
 
-**Breakpoints**: The auto-DJ module tracks hour boundaries and inserts explicit breakpoint entries (`{ "message": "BREAKPOINT" }`) at the top of each hour for Backend-Service's PostgreSQL database. The mirror middleware sets `autoBreakpoint=true` on the corresponding tubafrenzy write, so tubafrenzy handles breakpoints server-side as it always has.
+**Breakpoints**: The orchestrator tracks hour boundaries and inserts explicit breakpoint entries (`{ "message": "BREAKPOINT" }`) at the top of each hour for Backend-Service's PostgreSQL database. The mirror middleware sets `autoBreakpoint=true` on the corresponding tubafrenzy write, so tubafrenzy handles breakpoints server-side as it always has.
 
 ---
 
@@ -674,9 +702,9 @@ The following sections describe traffic from the Arduino. The Arduino is optiona
 
 ### 3.6 tubafrenzy Flowsheet Operations (Legacy Arduino-Direct)
 
-**Status**: Live (implemented in `flowsheet_client.cpp`). To be superseded by the Backend-Service auto-DJ module.
+**Status**: Live (implemented in `flowsheet_client.cpp`). To be superseded by the auto-DJ orchestrator.
 
-This section documents the existing Arduino-to-tubafrenzy protocol for reference. Once the Backend-Service auto-DJ module is deployed, the Arduino firmware will be updated to remove this functionality. The protocol is preserved here because it informs the mirror middleware's implementation.
+This section documents the existing Arduino-to-tubafrenzy protocol for reference. Once the auto-DJ orchestrator is deployed, the Arduino firmware will be updated to remove this functionality. The protocol is preserved here because it informs the mirror middleware's implementation.
 
 All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success.
 
@@ -775,9 +803,9 @@ The Arduino sends this report on every relay state change (transition from on→
 
 **Status**: Planned (Phase 3)
 
-The WebSocket management channel provides real-time bidirectional communication between the Arduino and the management server (within Backend-Service). It carries heartbeats, commands, acknowledgments, and error reports.
+The WebSocket management channel provides real-time bidirectional communication between the Arduino and the management server (within the orchestrator). It carries heartbeats, commands, acknowledgments, and error reports.
 
-Note: Unlike the original design, the management channel no longer carries now-playing data. The auto-DJ module in Backend-Service subscribes to AzuraCast directly ([Section 3.3](#33-azuracast-centrifugo-websocket)). The management channel is exclusively for Arduino device management.
+Note: Unlike the original design, the management channel no longer carries now-playing data. The auto-DJ orchestrator subscribes to AzuraCast directly ([Section 3.3](#33-azuracast-centrifugo-websocket)). The management channel is exclusively for Arduino device management.
 
 #### 3.8.1 Connection Lifecycle
 
@@ -892,7 +920,7 @@ Sent on relay state transitions (on→off or off→on). This is the WebSocket eq
 | `key` | `string \| undefined` | Config key (only for `set_config`) |
 | `value` | `string \| undefined` | Config value (only for `set_config`) |
 
-Note: `pause`, `resume`, and `end_show` are removed from the Arduino's command set -- the Arduino no longer manages shows. These actions are now handled by the auto-DJ module's activation API ([Section 3.4](#34-auto-dj-activation-api)).
+Note: `pause`, `resume`, and `end_show` are removed from the Arduino's command set -- the Arduino no longer manages shows. These actions are now handled by the orchestrator's activation API ([Section 3.4](#34-auto-dj-activation-api)).
 
 **Acknowledgment** (Arduino → Server):
 
@@ -1104,11 +1132,11 @@ The auto-DJ system operates as a dedicated Better Auth user account. Set-up is a
    - Default: `false`
    - Purpose: Lets admin UIs and mobile apps filter automation DJs from human DJs. The column is part of the public schema and will propagate to all generated types.
 
-4. **Mint a Personal Access Token (PAT)** via Better Auth's bearer plugin. This is a long-lived token used internally by the auto-DJ module.
+4. **Mint a Personal Access Token (PAT)** via Better Auth's bearer plugin. This is a long-lived token used internally by the orchestrator.
 
-5. **Store the PAT** in Backend-Service's environment configuration (e.g., `AUTO_DJ_PAT` env var). The auto-DJ module reads this at startup.
+5. **Store the PAT** in the orchestrator's environment configuration (e.g., `AUTO_DJ_PAT` env var). The orchestrator reads this at startup.
 
-The auto-DJ module uses this PAT when calling the flowsheet API internally. It goes through the same authorization middleware as any external DJ request -- the system user has the `dj` role and `flowsheet:write` permission.
+The orchestrator uses this PAT when calling Backend-Service's flowsheet API. It goes through the same authorization middleware as any external DJ request -- the system user has the `dj` role and `flowsheet:write` permission. When targeting tubafrenzy, the orchestrator uses the `X-Auto-DJ-Key` instead.
 
 ### 4.4 dj-site Activation Auth
 
@@ -1208,8 +1236,8 @@ This ensures that a bad credential push doesn't permanently brick the WiFi fallb
 
 ### 4.9 Security Considerations
 
-- **Transport security**: All communication is over TLS. Backend-Service uses standard Node.js HTTPS. Arduino uses BearSSL via `SSLClient` (Ethernet) or `WiFiSSLClient` (WiFi).
-- **Auto-DJ module auth**: The auto-DJ module authenticates to the flowsheet API using the system user's PAT, going through the same middleware as external requests. No special bypasses.
+- **Transport security**: All communication is over TLS. The orchestrator and Backend-Service use standard Node.js HTTPS. Arduino uses BearSSL via `SSLClient` (Ethernet) or `WiFiSSLClient` (WiFi).
+- **Orchestrator auth**: When targeting Backend-Service, the orchestrator authenticates using the system user's PAT. When targeting tubafrenzy, it uses the `X-Auto-DJ-Key` header. Both go through the respective server's standard authentication.
 - **Arduino storage security**: KVStore writes to flash in plaintext. Physical access to the board could expose credentials. This is acceptable -- physical access to the studio already implies access to the mixing board, network, and everything else.
 - **Command authentication**: Arduino management commands are authenticated by the `X-Auto-DJ-Key` header. Key rotation ([Section 4.7](#47-credential-rotation-protocol-arduino)) mitigates compromise risk.
 - **Command validation**: The Arduino must validate all command payloads. Reject unknown actions, enforce maximum string lengths, and never execute arbitrary code from the server.
@@ -1515,7 +1543,7 @@ AutoDJStatus:
     subscription_mode:
       type: string
       enum: [websocket, polling]
-      description: How Backend-Service receives now-playing data
+      description: How the orchestrator receives now-playing data
     last_track:
       $ref: '#/components/schemas/AutoDJLastTrack'
     entries_posted:
@@ -1654,18 +1682,18 @@ The Arduino cannot consume npm packages. ArduinoJson code must manually match th
 | `AutoDJRelayState` | `management_client.cpp` | `sendRelayState()` JSON construction |
 | `AutoDJErrorReport` | `management_client.cpp` | `sendError()` JSON construction |
 
-Note: The Arduino no longer implements AzuraCast polling or flowsheet clients. Those responsibilities have moved to the Backend-Service auto-DJ module.
+Note: The Arduino no longer implements AzuraCast polling or flowsheet clients. Those responsibilities have moved to the auto-DJ orchestrator.
 
 ### 5.5 Consumer Matrix
 
 | Consumer | Language | Types Used |
 |----------|---------|------------|
-| Backend-Service (auto-DJ module) | TypeScript | `AutoDJStatus`, `AutoDJLastTrack` |
-| Backend-Service (management server) | TypeScript | `AutoDJWebSocketMessage` union, `AutoDJDeviceStatus`, `AutoDJCommandAction` |
+| Auto-DJ orchestrator | TypeScript | All types: `AutoDJStatus`, `AutoDJLastTrack`, `AutoDJWebSocketMessage` union, `AutoDJDeviceStatus`, `AutoDJCommandAction` |
 | dj-site (virtual switch) | TypeScript | `AutoDJStatus` |
 | dj-site (device dashboard) | TypeScript | `AutoDJDeviceStatus`, `AutoDJHeartbeat` |
 | Arduino | C++ (ArduinoJson) | `AutoDJHeartbeat`, `AutoDJCommand`, `AutoDJAck`, `AutoDJRelayState`, `AutoDJErrorReport` (manual contract) |
-| tubafrenzy | Java | None (mirror middleware handles replication; no type imports) |
+| Backend-Service | TypeScript | None (consumed via its own flowsheet API; no auto-DJ types needed) |
+| tubafrenzy | Java | None (consumed via its own HTTP API; no auto-DJ types needed) |
 
 The `is_automation` field on `DJ`/`NewDJ` schemas will also propagate to:
 - **Swift** (wxyc-ios-64) via existing code generation
@@ -1685,7 +1713,7 @@ If a formal WebSocket contract is needed later, AsyncAPI 2.x can reference these
 
 ### 6.1 Auto-DJ Module Architecture (Backend-Service)
 
-The auto-DJ module is a TypeScript module within Backend-Service that manages the AzuraCast subscription, track change detection, flowsheet writing, and mirror replication. It replaces the Arduino's `FlowsheetBackend` abstraction from the original design.
+The orchestrator is a standalone TypeScript service that manages the AzuraCast subscription, track change detection, flowsheet writing (to Backend-Service and/or tubafrenzy based on the `FLOWSHEET_BACKEND` flag), and Arduino device management. It replaces the Arduino's `FlowsheetBackend` abstraction from the original design, running the same dual-backend logic server-side.
 
 ```mermaid
 classDiagram
@@ -1760,7 +1788,7 @@ sequenceDiagram
 
 ### 6.3 Show Lifecycle
 
-The auto-DJ module manages the show lifecycle through Backend-Service's flowsheet API:
+The orchestrator manages the show lifecycle through Backend-Service's flowsheet API:
 
 ```mermaid
 sequenceDiagram
@@ -1887,7 +1915,7 @@ A CI check in `wxyc-shared` (`scripts/check-breaking-changes.js`) detects breaki
 
 ## 7. Implementation Roadmap
 
-The architecture pivot reorders the implementation phases. The Backend-Service auto-DJ module and dj-site virtual switch are Phase 1 -- they deliver the core auto-DJ functionality without any hardware. Arduino hardware integration becomes a later phase.
+The architecture pivot reorders the implementation phases. The auto-DJ orchestrator and dj-site virtual switch are Phase 1 -- they deliver the core auto-DJ functionality without any hardware. Arduino hardware integration becomes a later phase.
 
 ### 7.1 Phase 0: Automatic DST (Arduino Firmware)
 
@@ -1911,7 +1939,7 @@ Pure function of epoch seconds -- no network dependency, testable on desktop wit
 
 ### 7.2 Phase 1: Backend-Service Auto-DJ Module + dj-site Virtual Switch
 
-**This is the core deliverable.** The Backend-Service auto-DJ module and dj-site virtual switch deliver full auto-DJ functionality without any hardware changes.
+**This is the core deliverable.** The auto-DJ orchestrator and dj-site virtual switch deliver full auto-DJ functionality without any hardware changes.
 
 #### 7.2.1 wxyc-shared Schema Updates
 
@@ -2123,17 +2151,17 @@ flowchart LR
 
 ### Resolved
 
-1. ~~**Server choice:**~~ **Resolved.** Backend-Service hosts both the auto-DJ module and the Arduino management server. See [Appendix A](#appendix-a-server-choice-analysis).
+1. ~~**Server choice:**~~ **Resolved.** The auto-DJ orchestrator is a standalone service (deployed on Railway). It hosts both the AzuraCast subscription/flowsheet logic and the Arduino management server. Backend-Service remains the flowsheet API + auth. See [Appendix A](#appendix-a-server-choice-analysis).
 
 2. ~~**Centrifugo authentication:**~~ **Resolved.** The now-playing WebSocket endpoint (`/api/live/nowplaying/websocket`) is public -- no authentication token required ([source](https://www.azuracast.com/docs/developers/now-playing-data/)). See [Section 3.3](#33-azuracast-centrifugo-websocket).
 
-3. ~~**Backend-Service `autoBreakpoint` equivalent:**~~ **Resolved.** Backend-Service requires explicit breakpoint entries. The auto-DJ module handles this; the mirror middleware sets `autoBreakpoint=true` for tubafrenzy. See [Section 6.3](#63-show-lifecycle).
+3. ~~**Backend-Service `autoBreakpoint` equivalent:**~~ **Resolved.** Backend-Service requires explicit breakpoint entries. The orchestrator handles this; the mirror middleware sets `autoBreakpoint=true` for tubafrenzy. See [Section 6.3](#63-show-lifecycle).
 
 4. ~~**wxyc-shared entry point:**~~ **Decided** -- `@wxyc/shared/auto-dj`. See [Section 5.3](#53-typescript-extensions).
 
 5. ~~**AsyncAPI:**~~ **Decided** -- OpenAPI component schemas only. Protocol documented in prose with Mermaid diagrams. See [Section 5.6](#56-asyncapi-consideration).
 
-6. ~~**Backend-Service `show_id` tracking:**~~ **Resolved.** Backend-Service tracks the active show per DJ internally. The auto-DJ module does not need to pass `show_id` on every flowsheet write.
+6. ~~**Backend-Service `show_id` tracking:**~~ **Resolved.** Backend-Service tracks the active show per DJ internally. The orchestrator does not need to pass `show_id` on every flowsheet write.
 
 ### Open
 
@@ -2174,7 +2202,7 @@ flowchart LR
 | **Con** | Legacy Java 8; WebSocket in a JSP app is awkward | Arduino would need a second server dependency | Another service to deploy and maintain |
 | **Deployment** | Kattare shared hosting (limited) | EC2 (existing) | Railway (easy, but another bill) |
 
-**Conclusion**: Backend-Service is the strongest candidate. WebSocket is idiomatic in Node.js, Better Auth provides admin authentication, and the service is already deployed on EC2 with CI/CD. With the architecture pivot, Backend-Service now hosts both the auto-DJ module (AzuraCast subscription, flowsheet pipeline, mirror middleware) and the Arduino management server -- this is a natural fit since both concerns need access to the flowsheet API and Better Auth.
+**Conclusion (updated)**: With the architecture pivot, the auto-DJ orchestrator is a **standalone service** deployed separately (e.g., Railway). It handles AzuraCast subscription, flowsheet writing (to Backend-Service and/or tubafrenzy based on `FLOWSHEET_BACKEND` flag), and Arduino device management. Backend-Service remains the flowsheet API + auth server. The orchestrator validates admin JWTs via Backend-Service's JWKS endpoint (same pattern as wxyc-archive-search).
 
 ## Appendix B: AzuraCast Centrifugo Integration Details
 
@@ -2185,7 +2213,7 @@ AzuraCast embeds [Centrifugo](https://centrifugal.dev/) for real-time updates. I
 | **WebSocket** | `wss://<host>/api/live/nowplaying/websocket` | Bidirectional (subscribe + receive) |
 | **SSE** | `https://<host>/api/live/nowplaying/sse?cf_connect=<JSON>` | Server → client only |
 
-Backend-Service uses the WebSocket endpoint via `centrifuge-js` ([Section 3.3](#33-azuracast-centrifugo-websocket)). In the original design, the Arduino subscribed directly; in the revised architecture, Backend-Service is the consumer.
+The orchestrator uses the WebSocket endpoint via `centrifuge-js` ([Section 3.3](#33-azuracast-centrifugo-websocket)). In the original design, the Arduino subscribed directly; in the revised architecture, the orchestrator is the consumer.
 
 ### Protocol Details
 
@@ -2207,4 +2235,4 @@ The `recover: true` flag enables Centrifugo's [history recovery](https://centrif
 
 ### Historical Context: Relay Alternative
 
-The original design considered having the Arduino subscribe to Centrifugo directly, with a relay through the management server as a fallback. With the architecture pivot, this question is moot -- Backend-Service subscribes to Centrifugo using `centrifuge-js`, which runs natively in Node.js with no memory constraints or reconnection complexity. The Arduino no longer consumes AzuraCast data at all.
+The original design considered having the Arduino subscribe to Centrifugo directly, with a relay through the management server as a fallback. With the architecture pivot, this question is moot -- the orchestrator subscribes to Centrifugo using `centrifuge-js`, which runs natively in Node.js with no memory constraints or reconnection complexity. The Arduino no longer consumes AzuraCast data at all.
