@@ -112,7 +112,8 @@ These are physical wiring decisions that can only change if the hardware is rewi
 |-----------|--------------|---------|
 | `RELAY_PIN` | `2` | Mixing board AUX relay contact (INPUT_PULLUP) |
 | `STATUS_LED_PIN` | `3` | External status LED |
-| `DEBOUNCE_MS` | `50` | Relay debounce window |
+| `BUTTON_PIN` | `5` | Manual toggle button (INPUT_PULLUP) |
+| `DEBOUNCE_MS` | `50` | Relay and button debounce window |
 
 ### Operational Controls
 

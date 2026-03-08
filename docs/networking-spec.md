@@ -239,6 +239,32 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 
 **Phase**: The admin UI is part of Phase 3 ([Section 7.4](#74-phase-3-websocket-management--azuracast-direct-websocket)), tracked as a 14-day task (`p3d`) that runs in parallel with the WebSocket management client work.
 
+### 2.7 Activation Sources
+
+The auto-DJ system can be activated and deactivated from three sources. All activation logic lives in the orchestrator ([auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator)) -- the Arduino reports inputs but does not make activation decisions.
+
+| Source | Trigger | How it reaches the orchestrator | Section |
+|--------|---------|-------------------------------|---------|
+| **Virtual switch** | DJ clicks activate/deactivate in [dj-site](https://github.com/WXYC/dj-site) | `POST /api/auto-dj/activate` or `/deactivate` on the orchestrator | [3.10](#310-virtual-switch-api) |
+| **Physical button** | Mushroom head button press on Arduino | Arduino sends a `button_toggle` message over the management channel (WebSocket or HTTP fallback) | [3.6.2](#362-message-types), [3.7](#37-http-fallback-management-polling-wifi) |
+| **Relay** | Mixing board AUX relay state change | Arduino reports relay state in heartbeat; orchestrator auto-deactivates when relay indicates a live DJ is broadcasting | [3.6.2](#362-message-types) |
+
+#### Conflict Resolution
+
+1. **Live DJ always wins.** If the relay reports a live DJ (`is_live: true` from AzuraCast, or relay open), the orchestrator deactivates auto-DJ regardless of the virtual switch or button state. The status response shows `deactivatedBy.source: "relay"`.
+
+2. **Button and virtual switch are equivalent.** Both toggle the orchestrator's activation state. The last action wins. There is no precedence between them.
+
+3. **No automatic reactivation after live DJ.** When the relay transitions back to auto-DJ-active (live DJ signs off), the orchestrator does NOT automatically reactivate. A DJ must explicitly activate via the virtual switch or the physical button. This prevents the auto-DJ from unexpectedly resuming after a DJ finishes their show.
+
+#### Physical Button Hardware
+
+The Arduino has a 22mm industrial mushroom head button (momentary, spring return) on D5 (`BUTTON_PIN`), debounced identically to the relay input (50ms). See [wiring.md](wiring.md) for the full wiring guide. The button uses the NO (normally open) contact: at rest D5 reads HIGH (internal pullup), and pressing the button pulls D5 LOW.
+
+The button does NOT directly affect the Arduino's state machine. On a debounced press, the Arduino sends a `button_toggle` message to the orchestrator via the management channel ([Section 3.6.2](#362-message-types)). Over WiFi fallback, the press is reported in the next heartbeat via the `button_press_count` field ([Section 3.7](#37-http-fallback-management-polling-wifi)). The orchestrator decides whether to activate or deactivate based on its current state, and the result flows back to the Arduino via the standard ack/command mechanism.
+
+Before the orchestrator is deployed, the button is wired and debounced but has no effect. The Arduino continues to operate in relay-only mode.
+
 ---
 
 ## 3. Protocol Reference
@@ -262,6 +288,9 @@ The admin UI is a web dashboard that gives station managers remote visibility in
 | 13 | Admin UI → Mgmt Server | HTTPS POST | `/api/auto-dj/commands` | Better Auth session | JSON | N/A | Planned |
 | 14 | Admin UI → Mgmt Server | HTTPS GET | `/api/auto-dj/status` | Better Auth session | JSON response | N/A | Planned |
 | 15 | Arduino → NTP | WiFi.getTime() | (internal to WiFi module) | None | NTP | WiFi | **Implemented** |
+| 16 | dj-site → Orchestrator | HTTPS POST | `/api/auto-dj/activate` | Better Auth JWT | JSON | N/A | Planned |
+| 17 | dj-site → Orchestrator | HTTPS POST | `/api/auto-dj/deactivate` | Better Auth JWT | JSON | N/A | Planned |
+| 18 | dj-site → Orchestrator | HTTPS GET | `/api/auto-dj/status` | Better Auth JWT | JSON response | N/A | Planned |
 
 ### 3.2 Outbound HTTP: AzuraCast Now Playing
 
@@ -624,14 +653,15 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
     "reconnect_count": 0,
     "tracks_detected": 142,
     "tracks_posted": 140,
-    "errors_since_boot": 2
+    "errors_since_boot": 2,
+    "button_press_count": 0
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | `"heartbeat"` | Message discriminator |
-| `state` | `string` | Current state machine state (`BOOTING`, `IDLE`, `STARTING_SHOW`, `AUTO_DJ_ACTIVE`, `ENDING_SHOW`) |
+| `state` | `string` | Current state machine state (`BOOTING`, `CONNECTING_WIFI`, `IDLE`, `STARTING_SHOW`, `AUTO_DJ_ACTIVE`, `ENDING_SHOW`, `ERROR_STATE`) |
 | `transport` | `string` | Active transport (`"ethernet"` or `"wifi"`) |
 | `uptime_s` | `integer` | Seconds since boot |
 | `wifi_rssi` | `integer \| null` | WiFi signal strength in dBm, or `null` if on Ethernet |
@@ -649,6 +679,7 @@ All WebSocket messages are JSON objects with a `type` discriminator field.
 | `tracks_detected` | `integer` | Total track changes detected from AzuraCast since boot |
 | `tracks_posted` | `integer` | Total entries successfully posted to the flowsheet since boot |
 | `errors_since_boot` | `integer` | Total errors since boot |
+| `button_press_count` | `integer` | Number of button presses since last heartbeat (WiFi fallback only; 0 if no presses) |
 
 **Command** (Server → Arduino):
 
@@ -741,6 +772,33 @@ This is a flat structure designed for efficient ArduinoJson parsing. If the rela
 
 Consecutive identical errors are batched on the Arduino side: `count` is incremented locally and the error report is sent periodically rather than on every occurrence. This avoids flooding the WebSocket with repeated errors (e.g., a flapping network connection). The management server can relay these to Sentry or another error tracking service, grouped by `module` and `code`.
 
+**Button Toggle** (Arduino → Server):
+
+```json
+{
+    "type": "button_toggle",
+    "timestamp": 1709852100
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `"button_toggle"` | Message discriminator |
+| `timestamp` | `integer` | Unix timestamp of the button press (from NTP) |
+
+Sent when the physical mushroom button is pressed ([Section 2.7](#27-activation-sources)). The orchestrator responds by toggling its activation state. The ack includes the resulting state:
+
+```json
+{
+    "type": "ack",
+    "id": "btn_1709852100",
+    "status": "ok",
+    "result": { "active": true }
+}
+```
+
+The `result` field is an optional extension to the `AutoDJAck` schema. It is present only in acks for `button_toggle` messages. The Arduino uses `result.active` to update local state (e.g., status LED) but does not depend on it for state machine transitions. The `id` is derived from the button press timestamp for correlation.
+
 #### 3.6.3 Supported Commands
 
 | Action | Parameters | Effect | Hot-reload? |
@@ -788,7 +846,7 @@ When the Arduino is on WiFi (no persistent connections), the management channel 
 | **URL** | `https://<management-server>/api/auto-dj/heartbeat` |
 | **Auth** | `X-Auto-DJ-Key: <key>` |
 | **Content-Type** | `application/json` |
-| **Body** | Same JSON as the WebSocket heartbeat message ([Section 3.6.2](#362-message-types)) |
+| **Body** | Same JSON as the WebSocket heartbeat message ([Section 3.6.2](#362-message-types)). The `button_press_count` field carries any button presses that occurred since the last heartbeat; the orchestrator toggles state if the count is odd. |
 | **Response** | 200 OK |
 
 **Command poll** (Arduino → Server):
@@ -930,6 +988,139 @@ filter["connect"]["subs"]["station:*"]["publications"][0]["data"]["np"]["live"][
 If the Centrifugo payload exceeds ArduinoJson's practical parsing limits on the Giga R1 (~16 KB with filter), the relay approach ([Appendix B](#appendix-b-azuracast-centrifugo-integration-details)) becomes necessary -- the management server would extract the relevant fields and send a flat ~200-byte `AutoDJNowPlaying` message.
 
 See [Appendix B](#appendix-b-azuracast-centrifugo-integration-details) for the relay alternative and detailed Centrifugo integration notes.
+
+### 3.10 Virtual Switch API
+
+**Status**: Planned
+
+The orchestrator ([auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator)) exposes these endpoints for [dj-site](https://github.com/WXYC/dj-site) (and any future admin UI) to control auto-DJ activation. These are separate from the device management endpoints in [Section 3.8](#38-server-side-endpoints), which are Arduino-facing. These endpoints are included in this networking spec because this document is the single source of truth for all auto-DJ network traffic, and the orchestrator README explicitly references it.
+
+#### 3.10.1 Traffic Summary
+
+| # | Direction | Protocol | Endpoint | Auth | Content Type | Status |
+|---|-----------|----------|----------|------|-------------|--------|
+| 16 | dj-site → Orchestrator | HTTPS POST | `/api/auto-dj/activate` | Better Auth JWT | JSON | Planned |
+| 17 | dj-site → Orchestrator | HTTPS POST | `/api/auto-dj/deactivate` | Better Auth JWT | JSON | Planned |
+| 18 | dj-site → Orchestrator | HTTPS GET | `/api/auto-dj/status` | Better Auth JWT | JSON response | Planned |
+
+#### 3.10.2 Activate
+
+| Field | Value |
+|-------|-------|
+| **Method** | POST |
+| **URL** | `https://<orchestrator>/api/auto-dj/activate` |
+| **Auth** | `Authorization: Bearer <JWT>` (Better Auth, `dj` role or higher) |
+| **Request body** | None |
+| **Response (200)** | `AutoDJStatus` JSON (see below) |
+
+Activates the auto-DJ system. The orchestrator starts a show on the configured flowsheet backend(s) and begins subscribing to AzuraCast for track changes.
+
+**Error responses**:
+- `409 Conflict`: Auto-DJ is already active. Response body includes the current `AutoDJStatus`.
+- `409 Conflict`: A live DJ show is in progress. Auto-DJ cannot activate while a DJ is broadcasting.
+- `403 Forbidden`: Insufficient permissions.
+
+**Side effects**:
+- Orchestrator calls `POST /flowsheet/join` on Backend-Service (and/or `startRadioShow` on tubafrenzy) to create a show.
+- Orchestrator begins subscribing to AzuraCast now-playing feed.
+- If the Arduino is connected via the management channel, the orchestrator sends it a `resume` command (in case it was paused).
+
+#### 3.10.3 Deactivate
+
+| Field | Value |
+|-------|-------|
+| **Method** | POST |
+| **URL** | `https://<orchestrator>/api/auto-dj/deactivate` |
+| **Auth** | `Authorization: Bearer <JWT>` (Better Auth, `dj` role or higher) |
+| **Request body** | None |
+| **Response (200)** | `AutoDJDeactivateResponse` JSON (see below) |
+
+Deactivates the auto-DJ system. The orchestrator ends the current show and stops writing to the flowsheet.
+
+**Error responses**:
+- `409 Conflict`: Auto-DJ is not currently active.
+- `403 Forbidden`: Insufficient permissions.
+
+**Side effects**:
+- Orchestrator calls `POST /flowsheet/end` on Backend-Service (and/or `finishRadioShow` on tubafrenzy).
+- Orchestrator stops subscribing to AzuraCast.
+- If the Arduino is connected, the orchestrator sends it a `pause` command.
+
+#### 3.10.4 Status
+
+| Field | Value |
+|-------|-------|
+| **Method** | GET |
+| **URL** | `https://<orchestrator>/api/auto-dj/status` |
+| **Auth** | `Authorization: Bearer <JWT>` (Better Auth, `dj` role or higher for full status) |
+| **Response (200)** | `AutoDJStatus` JSON |
+
+Returns the current auto-DJ activation state, current track, and device status.
+
+**Response when active:**
+
+```json
+{
+    "active": true,
+    "activatedBy": {
+        "source": "virtual_switch",
+        "userId": "usr_abc123",
+        "userName": "DJ Moonbeam"
+    },
+    "activatedAt": "2026-03-07T22:15:00Z",
+    "showId": 789,
+    "currentTrack": {
+        "artist": "Juana Molina",
+        "title": "la paradoja",
+        "album": "DOGA",
+        "detectedAt": "2026-03-07T23:42:18Z"
+    },
+    "device": {
+        "online": true,
+        "transport": "ethernet",
+        "lastHeartbeat": "2026-03-07T23:44:30Z",
+        "relayState": "auto_dj_active"
+    }
+}
+```
+
+**Response when inactive:**
+
+```json
+{
+    "active": false,
+    "lastDeactivatedAt": "2026-03-07T20:00:00Z",
+    "lastDeactivatedBy": {
+        "source": "relay",
+        "detail": "Live DJ detected"
+    },
+    "device": {
+        "online": true,
+        "transport": "ethernet",
+        "lastHeartbeat": "2026-03-07T23:44:30Z",
+        "relayState": "dj_live"
+    }
+}
+```
+
+The `device` block is `null` if the Arduino has never connected to the orchestrator.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `active` | `boolean` | Whether auto-DJ is currently active |
+| `activatedBy` | `object \| undefined` | Present when active. `source` is one of `"virtual_switch"`, `"button"`, `"relay"` |
+| `activatedBy.userId` | `string \| undefined` | Better Auth user ID (only for `virtual_switch` source) |
+| `activatedBy.userName` | `string \| undefined` | Display name (only for `virtual_switch` source) |
+| `activatedAt` | `string \| undefined` | ISO 8601 timestamp of activation |
+| `showId` | `integer \| undefined` | Active flowsheet show ID |
+| `currentTrack` | `object \| null` | Current track from AzuraCast, or `null` if no track detected yet |
+| `lastDeactivatedAt` | `string \| undefined` | Present when inactive. ISO 8601 timestamp of last deactivation |
+| `lastDeactivatedBy` | `object \| undefined` | Present when inactive. Same `source` field as `activatedBy` |
+| `device` | `object \| null` | Arduino device status, or `null` if never connected |
+| `device.online` | `boolean` | Whether the Arduino is currently connected (heartbeat within 60s) |
+| `device.transport` | `string` | `"ethernet"` or `"wifi"` |
+| `device.lastHeartbeat` | `string` | ISO 8601 timestamp of last heartbeat |
+| `device.relayState` | `string` | `"auto_dj_active"` or `"dj_live"` |
 
 ---
 
@@ -1182,6 +1373,7 @@ AutoDJWebSocketMessage:
     - $ref: '#/components/schemas/AutoDJAck'
     - $ref: '#/components/schemas/AutoDJNowPlaying'
     - $ref: '#/components/schemas/AutoDJErrorReport'
+    - $ref: '#/components/schemas/AutoDJButtonToggle'
   discriminator:
     propertyName: type
     mapping:
@@ -1190,6 +1382,7 @@ AutoDJWebSocketMessage:
       ack: '#/components/schemas/AutoDJAck'
       now_playing: '#/components/schemas/AutoDJNowPlaying'
       error: '#/components/schemas/AutoDJErrorReport'
+      button_toggle: '#/components/schemas/AutoDJButtonToggle'
 ```
 
 #### 5.2.2 AutoDJHeartbeat
@@ -1216,7 +1409,7 @@ AutoDJHeartbeat:
       enum: [heartbeat]
     state:
       type: string
-      enum: [BOOTING, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW]
+      enum: [BOOTING, CONNECTING_WIFI, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW, ERROR_STATE]
     transport:
       type: string
       enum: [ethernet, wifi]
@@ -1249,6 +1442,9 @@ AutoDJHeartbeat:
       type: integer
     errors_since_boot:
       type: integer
+    button_press_count:
+      type: integer
+      description: Number of button presses since last heartbeat (WiFi fallback; 0 if none)
 
 AutoDJLastTrack:
   type: object
@@ -1314,6 +1510,9 @@ AutoDJAck:
     error:
       type: string
       description: Error message (only when status is error)
+    result:
+      type: object
+      description: Optional result data (e.g., { active: boolean } for button_toggle acks)
 ```
 
 #### 5.2.5 AutoDJNowPlaying
@@ -1376,7 +1575,7 @@ AutoDJErrorReport:
       type: string
     state:
       type: string
-      enum: [BOOTING, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW]
+      enum: [BOOTING, CONNECTING_WIFI, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW, ERROR_STATE]
     uptime_s:
       type: integer
     free_ram:
@@ -1451,6 +1650,133 @@ AutoDJCommandAction:
     - ping
 ```
 
+#### 5.2.9 AutoDJButtonToggle
+
+```yaml
+AutoDJButtonToggle:
+  type: object
+  required:
+    - type
+    - timestamp
+  properties:
+    type:
+      type: string
+      enum: [button_toggle]
+    timestamp:
+      type: integer
+      description: Unix timestamp of the button press (from NTP)
+```
+
+#### 5.2.10 AutoDJStatus (Virtual Switch API)
+
+Response type for `GET /api/auto-dj/status` and `POST /api/auto-dj/activate` ([Section 3.10](#310-virtual-switch-api)).
+
+```yaml
+AutoDJStatus:
+  type: object
+  required:
+    - active
+  properties:
+    active:
+      type: boolean
+    activatedBy:
+      $ref: '#/components/schemas/AutoDJActivationSource'
+    activatedAt:
+      type: string
+      format: date-time
+    showId:
+      type: integer
+    currentTrack:
+      $ref: '#/components/schemas/AutoDJCurrentTrack'
+      nullable: true
+    lastDeactivatedAt:
+      type: string
+      format: date-time
+    lastDeactivatedBy:
+      $ref: '#/components/schemas/AutoDJActivationSource'
+    device:
+      $ref: '#/components/schemas/AutoDJDeviceSummary'
+      nullable: true
+
+AutoDJActivationSource:
+  type: object
+  required:
+    - source
+  properties:
+    source:
+      type: string
+      enum: [virtual_switch, button, relay]
+    userId:
+      type: string
+      description: Better Auth user ID (only for virtual_switch source)
+    userName:
+      type: string
+      description: Display name (only for virtual_switch source)
+    detail:
+      type: string
+      description: Additional context (e.g., "Live DJ detected" for relay source)
+
+AutoDJCurrentTrack:
+  type: object
+  required:
+    - artist
+    - title
+    - album
+    - detectedAt
+  properties:
+    artist:
+      type: string
+    title:
+      type: string
+    album:
+      type: string
+    detectedAt:
+      type: string
+      format: date-time
+
+AutoDJDeviceSummary:
+  type: object
+  required:
+    - online
+    - transport
+    - lastHeartbeat
+    - relayState
+  properties:
+    online:
+      type: boolean
+    transport:
+      type: string
+      enum: [ethernet, wifi]
+    lastHeartbeat:
+      type: string
+      format: date-time
+    relayState:
+      type: string
+      enum: [auto_dj_active, dj_live]
+```
+
+#### 5.2.11 AutoDJDeactivateResponse
+
+Response type for `POST /api/auto-dj/deactivate` ([Section 3.10](#310-virtual-switch-api)).
+
+```yaml
+AutoDJDeactivateResponse:
+  type: object
+  required:
+    - active
+    - deactivatedBy
+    - deactivatedAt
+  properties:
+    active:
+      type: boolean
+      enum: [false]
+    deactivatedBy:
+      $ref: '#/components/schemas/AutoDJActivationSource'
+    deactivatedAt:
+      type: string
+      format: date-time
+```
+
 ### 5.3 TypeScript Extensions
 
 The new schemas live in `api.yaml` as `components/schemas` and are code-generated into `src/generated/models/`. Hand-written TypeScript utilities go in a new `src/auto-dj/` directory, following the pattern of `src/dtos/extensions.ts`.
@@ -1466,6 +1792,7 @@ import type {
     AutoDJAck,
     AutoDJNowPlaying,
     AutoDJErrorReport,
+    AutoDJButtonToggle,
 } from '../generated/models';
 
 // Discriminated union of all WebSocket message types
@@ -1474,7 +1801,8 @@ export type AutoDJWebSocketMessage =
     | AutoDJCommand
     | AutoDJAck
     | AutoDJNowPlaying
-    | AutoDJErrorReport;
+    | AutoDJErrorReport
+    | AutoDJButtonToggle;
 
 // Type guards
 export function isHeartbeat(msg: AutoDJWebSocketMessage): msg is AutoDJHeartbeat {
@@ -1496,6 +1824,10 @@ export function isNowPlaying(msg: AutoDJWebSocketMessage): msg is AutoDJNowPlayi
 export function isErrorReport(msg: AutoDJWebSocketMessage): msg is AutoDJErrorReport {
     return msg.type === 'error';
 }
+
+export function isButtonToggle(msg: AutoDJWebSocketMessage): msg is AutoDJButtonToggle {
+    return msg.type === 'button_toggle';
+}
 ```
 
 **`src/auto-dj/index.ts`**:
@@ -1508,11 +1840,17 @@ export type {
     AutoDJAck,
     AutoDJNowPlaying,
     AutoDJErrorReport,
+    AutoDJButtonToggle,
     AutoDJDeviceStatus,
     AutoDJCommandAction,
     AutoDJErrorLevel,
     AutoDJErrorCode,
     AutoDJLastTrack,
+    AutoDJStatus,
+    AutoDJActivationSource,
+    AutoDJCurrentTrack,
+    AutoDJDeviceSummary,
+    AutoDJDeactivateResponse,
     AutoDJWebSocketMessage as AutoDJWebSocketMessageSchema,
 } from '../generated/models';
 
@@ -1524,6 +1862,7 @@ export {
     isAck,
     isNowPlaying,
     isErrorReport,
+    isButtonToggle,
 } from './extensions';
 ```
 
@@ -1566,8 +1905,10 @@ The Arduino cannot consume npm packages. ArduinoJson code must manually match th
 
 | Consumer | Language | Types Used |
 |----------|---------|------------|
+| Orchestrator | TypeScript | All message types (`AutoDJWebSocketMessage` union), `AutoDJStatus`, `AutoDJDeactivateResponse`, `AutoDJActivationSource` |
 | Management server | TypeScript | All message types (`AutoDJWebSocketMessage` union) |
 | Backend-Service | TypeScript | `AutoDJDeviceStatus`, `AutoDJCommandAction` (if hosting management endpoints) |
+| dj-site | TypeScript | `AutoDJStatus`, `AutoDJDeactivateResponse`, `AutoDJActivationSource`, `AutoDJCurrentTrack`, `AutoDJDeviceSummary` |
 | Admin UI | TypeScript | `AutoDJDeviceStatus`, `AutoDJHeartbeat` |
 | Arduino | C++ (ArduinoJson) | All message types (manual contract, not import) |
 | tubafrenzy | Java | None (uses `X-Auto-DJ-Key` only; no management types) |
@@ -2305,6 +2646,10 @@ flowchart LR
 15. ~~**AsyncAPI**~~: **Decided** -- OpenAPI component schemas only. Protocol direction and lifecycle documented in prose with Mermaid sequence diagrams ([Section 3.6](#36-websocket-management-channel)). No AsyncAPI spec needed.
 
 16. **`is_automation` flag in mobile apps:** The `is_automation` column on `DJ`/`NewDJ` in `api.yaml` will propagate to Swift (wxyc-ios-64) and Kotlin (WXYC-Android) via existing code generation. A follow-up PR to each mobile app is needed to handle this field (e.g., filtering Auto DJ from DJ lists). Track as a separate task.
+
+17. **Button debounce edge:** Should the `ButtonMonitor` trigger on the falling edge (button pressed, D5 goes LOW) or the rising edge (button released, D5 goes HIGH)? Triggering on press feels more responsive, but triggering on release prevents accidental double-fires if the button bounces differently than the relay. The relay triggers on stable state rather than edges. Decision should be made during `ButtonMonitor` implementation and validated with the specific mushroom head button hardware.
+
+18. **Orchestrator URL for dj-site:** The orchestrator is a standalone service on Railway, separate from Backend-Service. dj-site needs a new environment variable (e.g., `NEXT_PUBLIC_ORCHESTRATOR_URL` or equivalent for the build tool in use) to route virtual switch API calls to the orchestrator. The exact env var prefix depends on dj-site's build tool (Vite uses `VITE_`, Next.js uses `NEXT_PUBLIC_`).
 
 ---
 

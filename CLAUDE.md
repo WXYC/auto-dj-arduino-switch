@@ -29,6 +29,7 @@ docs/                     Specifications and reference docs
 | `azuracast_client.h/.cpp` | AzuraCast Now Playing API client |
 | `flowsheet_client.h/.cpp` | tubafrenzy flowsheet API client |
 | `relay_monitor.h/.cpp` | Debounced relay input |
+| `button_monitor.h/.cpp` | Debounced manual toggle button input |
 | `wifi_manager.h/.cpp` | WiFi connection management |
 | `config.h` | All compile-time constants |
 
@@ -74,3 +75,4 @@ See [enclosure/README.md](enclosure/README.md) for full build/assembly instructi
 - `secrets.h` is gitignored. Copy from `secrets.h.example`.
 - The Giga R1's WiFi reconnection blocks for ~36s (firmware limitation). The state machine cannot run during this window.
 - The enclosure's `output/` directory is gitignored. Regenerate with `make -C enclosure all`.
+- The physical toggle button sends a `button_toggle` message to the orchestrator via the management channel. All activation logic lives in the orchestrator -- the button does not directly control the Arduino's state machine. See [docs/plan-button-and-virtual-switch.md](docs/plan-button-and-virtual-switch.md) for the virtual switch API spec and dj-site UI design.
