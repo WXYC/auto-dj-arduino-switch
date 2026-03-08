@@ -20,7 +20,7 @@ The networking spec (sections 2.4, 2.6, 3.8) defines management server endpoints
 - Spec the dj-site UI component for auto-DJ status
 - Add physical button to the Arduino wiring spec
 - Update the networking spec with the missing virtual switch sections
-- Update wiring.md, config.h docs, and CLAUDE.md
+- Update wiring.md, remote-administration.md, and CLAUDE.md
 
 ### Out of scope
 
@@ -102,7 +102,7 @@ Deactivates the auto-DJ system. The orchestrator ends the current show and stops
 
 Returns the current auto-DJ status. Available to any authenticated user (read-only).
 
-**Auth**: Better Auth session/JWT. Requires `dj` role or higher for full status; unauthenticated users receive a minimal response (active/inactive only).
+**Auth**: Better Auth session/JWT. Requires `dj` role or higher.
 
 **Response** (200):
 ```json
@@ -157,7 +157,7 @@ The orchestrator tracks three activation sources:
 | Source | Trigger | How it reaches the orchestrator |
 |--------|---------|-------------------------------|
 | `virtual_switch` | DJ clicks activate/deactivate in dj-site | `POST /api/auto-dj/activate` or `/deactivate` |
-| `button` | Physical mushroom button press on Arduino | Arduino sends a `toggle` message over the management channel (WebSocket or HTTP) |
+| `button` | Physical mushroom button press on Arduino | Arduino sends a `button_toggle` message over the management channel (WebSocket or HTTP) |
 | `relay` | Mixing board AUX relay state change | Arduino reports relay state in heartbeat; orchestrator auto-deactivates when relay indicates a live DJ is broadcasting |
 
 ### Conflict Resolution
@@ -255,7 +255,7 @@ export const autoDJApi = createApi({
       // Poll every 10 seconds for near-real-time status
       pollingInterval: 10_000,
     }),
-    activate: builder.mutation<AutoDJActivateResponse, void>({
+    activate: builder.mutation<AutoDJStatus, void>({
       query: () => ({ url: "/activate", method: "POST" }),
       invalidatesTags: ["AutoDJStatus"],
     }),
@@ -295,7 +295,7 @@ The button does NOT directly control the state machine. Instead:
 1. `ButtonMonitor` detects a debounced press (rising edge on release, or falling edge on press -- TBD based on the specific button's NO wiring)
 2. The main loop sends a `button_toggle` message to the orchestrator via the management channel
 3. The orchestrator decides whether to activate or deactivate
-4. The orchestrator's response flows back as a command, which the state machine already handles
+4. The orchestrator's response flows back as an ack with `result.active`, which the management client uses to update local state (e.g., status LED)
 
 This keeps the state machine pure and the Arduino "dumb" -- all activation logic lives in the orchestrator.
 
@@ -323,7 +323,7 @@ Add new sections (do NOT renumber existing sections -- that would break cross-re
 - **New section 3.10 "Virtual Switch API"**: The orchestrator-facing endpoints defined in this plan (activate, deactivate, status). Note: these are not Arduino-facing protocols (unlike the rest of section 3), but they are included here because the networking spec is the single source of truth for all auto-DJ network traffic and the orchestrator README explicitly references it
 - **Section 3.6.2**: Add `button_toggle` to the WebSocket message types table
 - **Section 3.7**: Add `button_press_count` field to the HTTP heartbeat schema
-- **Section 5.2**: Add `AutoDJButtonToggle`, `AutoDJActivateResponse`, `AutoDJDeactivateResponse`, `AutoDJStatus` schemas to the `api.yaml` additions. Add `AutoDJButtonToggle` to the `AutoDJWebSocketMessage` `oneOf` discriminated union. Extend `AutoDJAck` with optional `result: object` field
+- **Section 5.2**: Add `AutoDJButtonToggle`, `AutoDJStatus`, `AutoDJDeactivateResponse`, `AutoDJActivationSource`, `AutoDJCurrentTrack`, `AutoDJDeviceSummary` schemas to the `api.yaml` additions. Add `AutoDJButtonToggle` to the `AutoDJWebSocketMessage` `oneOf` discriminated union. Extend `AutoDJAck` with optional `result: object` field
 - **Section 8**: Add open question about button debounce edge (press vs. release)
 
 Also reconcile a pre-existing discrepancy: the `AutoDJHeartbeat` schema in section 5.2.2 lists state values `BOOTING, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW`, but the actual `State` enum in `state_machine.h` includes `CONNECTING_WIFI` and `ERROR_STATE` as well. Fix the schema to include all seven states.
