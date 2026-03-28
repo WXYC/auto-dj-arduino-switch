@@ -12,14 +12,14 @@ The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's au
 
 The device will sit inside the WXYC studio, wired into the mixing board. Once deployed, every configuration change -- including the annual UNC-PSK password rotation -- would require someone to walk to the studio with a laptop, connect via USB, and reflash the firmware. There would be no way to check whether the device is alive, inspect its state, or intervene remotely. For a device designed to run unattended, this is untenable.
 
-Beyond remote access, the firmware currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service), and the Arduino must support both targets during the transition and afterward.
+Beyond remote access, the firmware currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service). Backend-Service writes are delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using JWT. The Arduino continues to write to tubafrenzy directly.
 
 ### 1.3 Document Scope
 
 This document covers:
 
 - All network traffic to and from the Arduino (HTTP, WebSocket, UDP)
-- Both flowsheet backends (tubafrenzy and Backend-Service)
+- Flowsheet writes to tubafrenzy (Arduino) and Backend-Service (via [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator))
 - Shared type contracts via [`wxyc-shared`](https://github.com/WXYC/wxyc-shared) (`api.yaml`)
 - Authentication and credential management for all connections
 - The management server protocol (WebSocket + HTTP fallback)
@@ -64,8 +64,7 @@ flowchart TD
     subgraph External["External Services"]
         AZ["AzuraCast<br>remote.wxyc.org<br>(Now Playing API +<br>Centrifugo WebSocket)"]
         TF["tubafrenzy<br>www.wxyc.info<br>(Legacy Flowsheet API)"]
-        BS["Backend-Service<br>api.wxyc.org<br>(New Flowsheet API)"]
-        MS["Management Server<br>(WebSocket + REST)"]
+        MS["Management Server<br>(auto-dj-orchestrator)<br>(WebSocket + REST)"]
         NTP["NTP Server<br>pool.ntp.org"]
     end
 
@@ -76,13 +75,11 @@ flowchart TD
     ARD -- "HTTPS GET<br>now-playing poll<br>(WiFi fallback)" --> AZ
     ARD -. "WSS<br>now-playing push<br>(Ethernet, direct)" .-> AZ
     ARD -- "HTTPS POST<br>form-encoded" --> TF
-    ARD -. "HTTPS POST<br>JSON + Bearer token" .-> BS
     ARD -. "WSS / HTTPS<br>heartbeat + commands" .-> MS
     ARD -- "UDP :123<br>time sync" --> NTP
 
     UI -. "HTTPS<br>status + commands" .-> MS
 
-    style BS stroke-dasharray: 5 5
     style MS stroke-dasharray: 5 5
 ```
 
@@ -132,30 +129,23 @@ This means:
 
 **NTP**: When Ethernet is the active transport, `WiFi.getTime()` is unavailable. The [`NTPClient`](https://github.com/arduino-libraries/NTPClient) library (Fabrice Weinberg) provides NTP over `EthernetUDP`. The `NetworkManager` exposes a `getTime()` method that delegates to `WiFi.getTime()` or `NTPClient::getEpochTime()` depending on the active transport. See [Section 3.5](#35-outbound-udp-ntp-time-sync).
 
-### 2.3 Dual-Backend Architecture
+### 2.3 Flowsheet Write Architecture
 
-The Arduino supports both tubafrenzy and Backend-Service as flowsheet targets. A `FLOWSHEET_BACKEND` config flag controls which backend is active.
+The Arduino writes flowsheet entries to tubafrenzy only. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using standard JWT refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)).
 
-| | tubafrenzy | Backend-Service |
+| | Arduino → tubafrenzy | Orchestrator → Backend-Service |
 |--|-----------|----------------|
 | **Content type** | `application/x-www-form-urlencoded` | `application/json` |
-| **Auth** | `X-Auto-DJ-Key` header | `Authorization: Bearer <PAT>` |
+| **Auth** | `X-Auto-DJ-Key` header | `Authorization: Bearer <JWT>` (service account) |
 | **Start show** | POST `/playlists/startRadioShow` → 302, `radioShowID` from Location header | POST `/flowsheet/join` → 200 JSON, `Show.id` from response body |
 | **Add entry** | POST `/playlists/flowsheetEntryAdd` → 302 | POST `/flowsheet` → 200 JSON |
 | **End show** | POST `/playlists/finishRadioShow` → 302 | POST `/flowsheet/end` → 200 JSON |
 | **Breakpoints** | Server auto-inserts via `autoBreakpoint=true` | Client must POST explicit breakpoint entry |
-| **DJ ID** | `"0"` (string, no DJ table) | Auto-incremented integer from DJ table |
+| **DJ ID** | `"0"` (string, no DJ table) | Resolved server-side from service identity |
 
-**Data flow and mirroring**: Backend-Service mirrors flowsheet data to tubafrenzy. When the Arduino targets Backend-Service, tubafrenzy's flowsheet is populated via this mirror -- no data is lost. This means the dual-backend support serves two purposes:
+**Why the Arduino doesn't talk to Backend-Service directly**: Backend-Service uses JWT authentication with token refresh. The Arduino's constrained environment (no `jose`, limited RAM, BearSSL-only TLS) makes JWT refresh impractical. The orchestrator is a server-side Node.js service that handles JWT lifecycle naturally. This eliminates the PAT vs JWT conflict — the Arduino uses a simple shared secret (`X-Auto-DJ-Key`) for tubafrenzy and the management server, while the orchestrator handles all JWT-authenticated communication.
 
-1. **Migration**: When Backend-Service is ready, switch the Arduino to target it. tubafrenzy continues to receive data via the mirror.
-2. **Rollback**: If Backend-Service has a bug that breaks flowsheet writes, switch back to tubafrenzy via the management channel without a reflash. The Arduino resumes writing to tubafrenzy directly. Backend-Service stops receiving entries until the bug is fixed and the Arduino is switched back.
-
-The rollback capability is why `FLOWSHEET_BACKEND` is a runtime parameter ([KVStore](https://os.mbed.com/docs/mbed-os/v6.16/apis/kvstore.html), after Phase 1) rather than a compile-time-only flag. It requires a restart (not hot-reloadable) because switching backends mid-show would leave the new client without an active show context (Section 6.6).
-
-**Configuration**: In [`config.h`](../auto-dj-arduino-switch/config.h), `FLOWSHEET_BACKEND` is `TUBAFRENZY` or `BACKEND_SERVICE`. After Phase 1 (KVStore), this becomes a runtime parameter switchable via the management channel's `set_config` command (restart required). The flag also determines which credentials and host/port to use.
-
-See [Section 6](#6-dual-backend-flowsheet-client) for the full dual-backend client specification.
+**Data flow**: The orchestrator writes to Backend-Service (JWT) and mirrors to tubafrenzy (`X-Auto-DJ-Key`). The Arduino's direct tubafrenzy writes serve as a fallback path if the orchestrator is unavailable. See the [orchestrator README](https://github.com/WXYC/auto-dj-orchestrator/blob/main/README.md) for the `FLOWSHEET_BACKEND` flag that controls the orchestrator's write targets.
 
 ### 2.4 Management Server
 
@@ -169,7 +159,7 @@ The management server is the remote administration layer for the Arduino. It pro
 | **Command dispatch** | Accept commands from the admin UI (`pause`, `resume`, `end_show`, `set_config`, `restart`, `ping`), enqueue them, and deliver them to the Arduino over WebSocket or HTTP poll. Track pending commands until acknowledged. | [Section 3.6.3](#363-supported-commands), [3.8](#38-server-side-endpoints) |
 | **Acknowledgment processing** | Receive acks from the Arduino confirming command execution. Dequeue the command, update status. Surface errors to the admin UI. | [Section 3.6.2](#362-message-types) |
 | **Error report relay** | Receive structured error reports from the Arduino and forward them to [Sentry](https://sentry.io/) or another error tracking service. Alert on `fatal`-level errors. | [Section 3.6.2](#362-message-types) |
-| **Credential rotation** | Push new API keys or Backend-Service PATs to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | [Section 4.6](#46-credential-rotation-protocol) |
+| **Credential rotation** | Push new API keys to the Arduino via `set_config` commands. Coordinate the two-phase rotation protocol (accept both old and new, then revoke old). | [Section 4.6](#46-credential-rotation-protocol) |
 | **Admin API** | Expose device status and command endpoints to the admin UI, authenticated via Better Auth (session cookies or JWT, `stationManager` role). | [Section 3.8](#38-server-side-endpoints), [4.5](#45-management-server-auth-admin-facing) |
 
 **What the management server does NOT do**: The now-playing feed does **not** flow through the management server. The Arduino subscribes directly to AzuraCast's Centrifugo WebSocket ([Section 3.9](#39-azuracast-centrifugo-direct-websocket)). The management server handles only device management -- it never touches flowsheet data or track metadata. (The relay architecture was considered and rejected; see [Appendix B](#appendix-b-azuracast-centrifugo-integration-details).)
@@ -277,9 +267,9 @@ Before the orchestrator is deployed, the button is wired and debounced but has n
 | 2 | Arduino → tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
 | 3 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
 | 4 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
-| 5 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer token | JSON | Both | Planned |
-| 6 | Arduino → Backend-Service | HTTPS POST | `/flowsheet` | Bearer token | JSON | Both | Planned |
-| 7 | Arduino → Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer token | JSON | Both | Planned |
+| 5 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer JWT | JSON | N/A (server-side) | Planned |
+| 6 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet` | Bearer JWT | JSON | N/A (server-side) | Planned |
+| 7 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer JWT | JSON | N/A (server-side) | Planned |
 | 8 | Arduino ↔︎ AzuraCast | WSS | `/api/live/nowplaying/websocket` | None (public) | JSON frames | Ethernet | Planned |
 | 9 | Arduino → NTP | UDP | `pool.ntp.org:123` | None | NTP packet | Ethernet | Planned |
 | 10 | Arduino ↔︎ Mgmt Server | WSS | `/api/auto-dj/ws` | `X-Auto-DJ-Key` | JSON frames | Ethernet | Planned |
@@ -396,11 +386,13 @@ All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-K
 | `radioShowID` | integer | From `startShow()` response |
 | `mode` | `"signoffConfirm"` | Skips the interactive JSP confirmation page |
 
-### 3.4 Outbound HTTP: Backend-Service Flowsheet Operations
+### 3.4 Backend-Service Flowsheet Operations (via Orchestrator)
 
-**Status**: Planned
+**Status**: Planned (orchestrator responsibility)
 
-All Backend-Service requests are JSON POSTs authenticated by a Bearer token (Better Auth Personal Access Token). Responses are 200 with JSON bodies.
+The Arduino does not communicate with Backend-Service directly. All Backend-Service flowsheet operations are performed by the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity (`auto-dj-orchestrator@services.wxyc.org`) using JWT with standard token refresh. See [Section 2.3](#23-flowsheet-write-architecture) for the rationale.
+
+The following endpoint specifications describe the orchestrator's Backend-Service communication. They are documented here for completeness since the orchestrator implements the same logical flowsheet operations as the Arduino's tubafrenzy client. All requests are JSON POSTs authenticated by a Bearer token (JWT). Responses are 200 with JSON bodies.
 
 #### 3.4.1 Join Show
 
@@ -409,22 +401,22 @@ All Backend-Service requests are JSON POSTs authenticated by a Bearer token (Bet
 | **Method** | POST |
 | **URL** | `https://api.wxyc.org/flowsheet/join` |
 | **Content-Type** | `application/json` |
-| **Auth** | `Authorization: Bearer <PAT>` |
+| **Auth** | `Authorization: Bearer <JWT>` |
 | **Success response** | 200 JSON (`Show` or `ShowDJ`) |
 
 **Request body**:
 
 ```json
 {
-    "dj_id": 42,
     "show_name": "Auto DJ"
 }
 ```
 
 | Field | Type | Source |
 |-------|------|--------|
-| `dj_id` | `integer` | The Auto DJ's DJ record ID in Backend-Service (stored in `secrets.h` / KVStore) |
-| `show_name` | `string` | `AUTO_DJ_SHOW_NAME` from `config.h` |
+| `show_name` | `string` | Orchestrator configuration |
+
+Backend-Service resolves the Auto DJ's `dj_id` server-side from the orchestrator's service identity (`auto-dj-orchestrator`). The orchestrator does not supply a `dj_id` — this eliminates client trust for identity.
 
 **Response** (`Show` schema):
 
@@ -447,7 +439,7 @@ The `id` field is the show identifier used for subsequent operations (equivalent
 | **Method** | POST |
 | **URL** | `https://api.wxyc.org/flowsheet` |
 | **Content-Type** | `application/json` |
-| **Auth** | `Authorization: Bearer <PAT>` |
+| **Auth** | `Authorization: Bearer <JWT>` |
 | **Success response** | 200 JSON (`FlowsheetEntryResponse`) |
 
 **Request body** (freeform song entry):
@@ -479,16 +471,10 @@ Note: The `show_id` is implicit -- Backend-Service tracks the active show for ea
 | **Method** | POST |
 | **URL** | `https://api.wxyc.org/flowsheet/end` |
 | **Content-Type** | `application/json` |
-| **Auth** | `Authorization: Bearer <PAT>` |
+| **Auth** | `Authorization: Bearer <JWT>` |
 | **Success response** | 200 JSON (`Show` or `ShowDJ`) |
 
-**Request body**:
-
-```json
-{
-    "dj_id": 42
-}
-```
+**Request body**: Empty. Backend-Service identifies the orchestrator's active show from the service identity.
 
 #### 3.4.4 Add Breakpoint (Backend-Service only)
 
@@ -504,16 +490,17 @@ Unlike tubafrenzy (which auto-inserts breakpoints via `autoBreakpoint=true`), Ba
 
 #### 3.4.5 Show Lifecycle Comparison
 
-The full show lifecycle for both backends, showing the key protocol differences:
+The full show lifecycle for both backends, showing the key protocol differences. The Arduino writes to tubafrenzy directly; the orchestrator handles Backend-Service:
 
 ```mermaid
 sequenceDiagram
     participant Arduino
     participant TF as tubafrenzy
+    participant ORCH as auto-dj-orchestrator
     participant BS as Backend-Service
 
     rect rgb(200, 220, 240)
-    Note over Arduino,TF: tubafrenzy path (live)
+    Note over Arduino,TF: Arduino → tubafrenzy (live)
     Arduino->>TF: POST /playlists/startRadioShow<br/>(form-encoded, X-Auto-DJ-Key)
     TF-->>Arduino: 302 Location: ...radioShowID=12345
 
@@ -527,22 +514,22 @@ sequenceDiagram
     end
 
     rect rgb(220, 240, 200)
-    Note over Arduino,BS: Backend-Service path (planned)
-    Arduino->>BS: POST /flowsheet/join<br/>(JSON, Bearer token)
-    BS-->>Arduino: 200 {"id": 789, ...}
+    Note over ORCH,BS: Orchestrator → Backend-Service (planned)
+    ORCH->>BS: POST /flowsheet/join<br/>(JSON, Bearer JWT)
+    BS-->>ORCH: 200 {"id": 789, ...}
 
     loop Each track change
-        Arduino->>BS: POST /flowsheet
-        BS-->>Arduino: 200 JSON
+        ORCH->>BS: POST /flowsheet
+        BS-->>ORCH: 200 JSON
     end
 
     opt Hour boundary
-        Arduino->>BS: POST /flowsheet<br/>{"message": "BREAKPOINT"}
-        BS-->>Arduino: 200 JSON
+        ORCH->>BS: POST /flowsheet<br/>{"message": "BREAKPOINT"}
+        BS-->>ORCH: 200 JSON
     end
 
-    Arduino->>BS: POST /flowsheet/end
-    BS-->>Arduino: 200 JSON
+    ORCH->>BS: POST /flowsheet/end
+    BS-->>ORCH: 200 JSON
     end
 ```
 
@@ -818,12 +805,11 @@ The `result` field is an optional extension to the `AutoDJAck` schema. It is pre
 | `wifi_ssid` / `wifi_pass` | No | Requires restart (see below) |
 | `api_key` | Yes | Takes effect on next HTTP request |
 | `utc_offset` | Yes | Takes effect on next `currentHourMs()` call |
-| `flowsheet_backend` | No | Requires restart (see below) |
-| `backend_service_token` | Yes | Takes effect on next Backend-Service request |
+| `flowsheet_backend` | No | Reserved for future use |
 
 **Why `wifi_ssid` / `wifi_pass` require restart**: WiFi credentials are consumed by `WiFi.begin(ssid, password)` during the connection sequence. The WiFi module's firmware holds onto the credentials it was given at `begin()` -- updating the `RuntimeConfig` struct alone doesn't reconnect. Calling `WiFi.disconnect()` + `WiFi.begin()` with new credentials would block the `loop()` for up to 36 seconds (the Giga R1 firmware bug). A restart sequences this cleanly through the normal boot path. Since WiFi is only the fallback transport (Section 2.2), this is low-urgency.
 
-**Why `flowsheet_backend` requires restart**: Switching backends changes which `FlowsheetBackend` implementation is active (`TubafrenzyBackend` vs `BackendServiceBackend`). These are different objects with different internal state -- different hosts, auth headers, and show IDs (`radioShowID` vs `Show.id`). Switching mid-show would leave the new client without an active show context, since it never called `startShow()`. A restart cleanly ends the current show and starts fresh on the new backend. See Section 2.3 for the migration and rollback rationale.
+**`flowsheet_backend`**: Reserved for future use. The Arduino currently writes to tubafrenzy only. The dual-backend concept (writing to both tubafrenzy and Backend-Service) is handled by the orchestrator server-side. See [Section 2.3](#23-flowsheet-write-architecture).
 
 #### 3.6.5 Keepalive Strategy
 
@@ -1132,8 +1118,9 @@ The `device` block is `null` if the Arduino has never connected to the orchestra
 |-----------|----------|------------------|-------------------|
 | WiFi password (`WIFI_PASS`) | [`secrets.h`](../auto-dj-arduino-switch/secrets.h) (compile-time), KVStore (runtime, after Phase 1) | UNC-PSK WiFi network | Annually (UNC policy) |
 | tubafrenzy API key (`AUTO_DJ_API_KEY`) | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | tubafrenzy flowsheet API | Manual (operator-initiated) |
-| Backend-Service PAT | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | Backend-Service flowsheet API | Manual (operator-initiated, or via management server push) |
 | Management server key | Same as `AUTO_DJ_API_KEY` (shared) | Management server WebSocket + HTTP | Same as tubafrenzy API key |
+
+The Arduino has no Backend-Service credentials. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using JWT with standard token refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)).
 
 ### 4.2 tubafrenzy Authentication
 
@@ -1164,56 +1151,29 @@ Key details:
 - **Server-side config**: The `AUTO_DJ_API_KEY` environment variable on the tubafrenzy server (wxyc.info) must match the value in the Arduino's `secrets.h`.
 - **Bypass of IP check**: A valid `X-Auto-DJ-Key` bypasses the normal control-room IP address check in `validateControlRoomAccess()`.
 
-### 4.3 Backend-Service Authentication
+### 4.3 Backend-Service Authentication (Delegated to Orchestrator)
 
-**Status**: Planned
+**Status**: Planned (orchestrator responsibility)
 
-Backend-Service uses Better Auth for authentication. The Arduino authenticates as a dedicated service account using a Personal Access Token (PAT) issued by Better Auth's bearer plugin.
+The Arduino does not authenticate to Backend-Service directly. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity (`auto-dj-orchestrator@services.wxyc.org`) using standard JWT refresh — sign in at startup, cache token, refresh before expiry.
 
-#### Set-up (one-time, by an admin)
+This eliminates the PAT vs JWT conflict: the Arduino's constrained environment cannot perform JWT refresh, but the orchestrator (a server-side Node.js service) handles it naturally. The Arduino's credential inventory is simplified to WiFi password, tubafrenzy API key, and management server key.
 
-1. **Create a Better Auth user** for the Auto DJ (email: `auto-dj@wxyc.org`, role: `dj`). This is a real user account in Better Auth, but it represents an automation system, not a person.
+#### Orchestrator service account set-up (one-time, by an admin)
+
+1. **Create a better-auth user** for the orchestrator (email: `auto-dj-orchestrator@services.wxyc.org`, role: `auto-dj-orchestrator`). This is a service identity with scoped permissions (`flowsheet: read, write`) declared in `ServiceRoles`.
 
 2. **Register a DJ record** via `POST /djs/register` with:
    - `dj_name`: `"Auto DJ"`
    - `is_automation`: `true`
-   - The `dj_id` is auto-incremented by Backend-Service (not 0, to avoid conflicts with auto-increment conventions).
+   - Backend-Service resolves the Auto DJ's `dj_id` server-side from the service identity — the orchestrator never supplies it.
 
 3. **Add `is_automation` to the `DJ` and `NewDJ` schemas in `api.yaml`**:
    - Type: `boolean`
    - Default: `false`
    - Purpose: Lets admin UIs filter automation DJs from human DJs without Backend-Service-specific logic. The column is part of the public schema and will propagate to all generated types.
 
-4. **Mint a Personal Access Token (PAT)** via Better Auth's bearer plugin. This is a long-lived token that the Arduino sends as `Authorization: Bearer <PAT>`.
-
-The Arduino cannot create its own account -- this is an admin provisioning step.
-
-#### Arduino configuration
-
-The PAT and `dj_id` are stored in:
-
-- `secrets.h` (compile-time default)
-- KVStore (runtime, after Phase 1, overridable via `set_config`)
-
-The Arduino sends `Authorization: Bearer <PAT>` on all Backend-Service requests.
-
-tubafrenzy continues to use `djID=0` independently -- the two backends have separate DJ identity systems.
-
-#### Token refresh
-
-The management server can push a new PAT via the `set_config` command:
-
-```json
-{
-    "type": "command",
-    "id": "tok-refresh-1",
-    "action": "set_config",
-    "key": "backend_service_token",
-    "value": "<new-PAT>"
-}
-```
-
-This takes effect immediately (hot-reloadable) on the next Backend-Service request.
+See [unified-auth-system.md Section 8](https://github.com/WXYC/docs/blob/main/unified-auth-system.md#8-service-to-service-authentication) for the full orchestrator auth flow.
 
 ### 4.4 Management Server Auth (Arduino-Facing)
 
@@ -1227,7 +1187,7 @@ The management server validates the key using the same timing-safe comparison pa
 
 ### 4.5 Management Server Auth (Admin-Facing)
 
-Admin-facing endpoints (`POST /api/auto-dj/commands`, `GET /api/auto-dj/status`) authenticate via Better Auth session cookies or JWT. Only users with the `stationManager` role (or a to-be-defined `admin` capability) can issue commands to the device.
+Admin-facing endpoints (`POST /api/auto-dj/commands`, `GET /api/auto-dj/status`) authenticate via Better Auth session cookies or JWT. `stationManager`+ can issue operational commands (pause/resume/status); `superAdmin` is required for infrastructure operations (credential rotation, config push). See [unified-auth-system.md Section 8](https://github.com/WXYC/docs/blob/main/unified-auth-system.md#orchestrator-admin-endpoint-access-matrix) for the full access matrix.
 
 ### 4.6 Credential Rotation Protocol
 
@@ -1287,28 +1247,7 @@ sequenceDiagram
 
 #### Backend-Service token rotation
 
-1. Mint a new PAT in Better Auth.
-2. Push the new PAT to the Arduino via `set_config` with `key=backend_service_token`.
-3. Arduino acknowledges; old PAT can be revoked.
-
-```mermaid
-sequenceDiagram
-    participant Admin
-    participant BA as Better Auth
-    participant Server as Mgmt Server
-    participant Arduino
-
-    Admin->>BA: Mint new PAT
-    BA-->>Admin: new-PAT
-
-    Admin->>Server: POST /api/auto-dj/commands<br/>{"action": "set_config",<br/>"key": "backend_service_token",<br/>"value": "new-PAT"}
-    Server->>Arduino: {"type": "command",<br/>"action": "set_config",<br/>"key": "backend_service_token",<br/>"value": "new-PAT"}
-    Arduino->>Arduino: Write new PAT to KVStore
-    Arduino->>Server: {"type": "ack", "status": "ok"}
-    Server-->>Admin: Command acknowledged
-
-    Admin->>BA: Revoke old PAT
-```
+Not applicable to the Arduino. The orchestrator manages its own JWT refresh cycle (sign in at startup, refresh before expiry). Credential rotation for the orchestrator's service account is handled through better-auth's standard password reset flow, not through the Arduino's management channel.
 
 ### 4.7 Credential Fallback and Recovery
 
@@ -1330,7 +1269,7 @@ This ensures that a bad credential push doesn't permanently brick the WiFi fallb
 
 - **Transport security**: All communication is over TLS (BearSSL via `SSLClient` on Ethernet, `WiFiSSLClient` on WiFi). Credentials are encrypted in transit.
 - **Storage security**: KVStore writes to flash in plaintext. An attacker with physical access to the board could read the flash. This is acceptable -- physical access to the studio already implies access to the mixing board, network, and everything else.
-- **Command authentication**: Commands are authenticated by the `X-Auto-DJ-Key` header (management server) or Bearer token (Backend-Service). A compromised key would allow unauthorized actions. Key rotation ([Section 4.6](#46-credential-rotation-protocol)) mitigates this.
+- **Command authentication**: Commands are authenticated by the `X-Auto-DJ-Key` header (management server and tubafrenzy). A compromised key would allow unauthorized actions. Key rotation ([Section 4.6](#46-credential-rotation-protocol)) mitigates this.
 - **Command validation**: The Arduino must validate all command payloads. Reject unknown actions, enforce maximum string lengths, and never execute arbitrary code from the server.
 
 ---
@@ -1927,28 +1866,19 @@ If a formal WebSocket contract is needed later, [AsyncAPI](https://www.asyncapi.
 
 ---
 
-## 6. Dual-Backend Flowsheet Client
+## 6. Flowsheet Client
 
-### 6.1 Configuration Flag
+### 6.1 Architecture
 
-```cpp
-// config.h
-#define FLOWSHEET_BACKEND TUBAFRENZY  // or BACKEND_SERVICE
-```
+The Arduino writes to tubafrenzy only. The dual-backend concept (writing to both tubafrenzy and Backend-Service) is the responsibility of the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which controls the `FLOWSHEET_BACKEND` flag server-side. See [Section 2.3](#23-flowsheet-write-architecture).
 
-Values: `TUBAFRENZY` | `BACKEND_SERVICE`.
-
-After Phase 1 (KVStore), `flowsheet_backend` becomes a runtime parameter in the `RuntimeConfig` struct, switchable via the management channel's `set_config` command. Changing it requires a restart (not hot-reloadable) because it changes which client instance, credentials, and host/port are active.
-
-The flag also determines:
-
-| Setting | `TUBAFRENZY` | `BACKEND_SERVICE` |
-|---------|-------------|-------------------|
-| **Host** | `www.wxyc.info` | `api.wxyc.org` |
-| **Port** | `443` | `443` |
-| **Auth header** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <PAT>` |
-| **DJ ID** | `"0"` (string) | Auto-incremented integer from DJ table |
-| **Content type** | `application/x-www-form-urlencoded` | `application/json` |
+| Setting | Value |
+|---------|-------|
+| **Host** | `www.wxyc.info` |
+| **Port** | `443` |
+| **Auth header** | `X-Auto-DJ-Key: <key>` |
+| **DJ ID** | `"0"` (string, no DJ table) |
+| **Content type** | `application/x-www-form-urlencoded` |
 
 ### 6.2 tubafrenzy Client (existing)
 
@@ -1971,28 +1901,16 @@ Three operations:
    - Includes `mode=signoffConfirm`
    - Return true on 302
 
-### 6.3 Backend-Service Client (new)
+### 6.3 Backend-Service Client (orchestrator)
 
-To be implemented in `backend_service_client.cpp` and `backend_service_client.h`. See [Section 3.4](#34-outbound-http-backend-service-flowsheet-operations) for the full protocol specification.
+The Backend-Service client is implemented in the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), not on the Arduino. See [Section 3.4](#34-backend-service-flowsheet-operations-via-orchestrator) for the full protocol specification.
 
-Three operations (plus breakpoints):
+The orchestrator implements the same four logical operations:
 
-1. **`startShow(showName)`** → `int showId`
-   - POST JSON to `/flowsheet/join`
-   - Parse `id` from 200 JSON response body
-   - Return -1 on failure
-
-2. **`addEntry(artist, title, album)`** → `bool`
-   - POST JSON to `/flowsheet`
-   - Return true on 200
-
-3. **`endShow()`** → `bool`
-   - POST JSON to `/flowsheet/end`
-   - Return true on 200
-
-4. **`addBreakpoint()`** → `bool`
-   - POST JSON to `/flowsheet` with `{ "message": "BREAKPOINT" }`
-   - Return true on 200
+1. **`startShow(showName)`** → POST JSON to `/flowsheet/join` (Backend-Service resolves `dj_id` server-side)
+2. **`addEntry(artist, title, album)`** → POST JSON to `/flowsheet`
+3. **`endShow()`** → POST JSON to `/flowsheet/end`
+4. **`addBreakpoint()`** → POST JSON to `/flowsheet` with `{ "message": "BREAKPOINT" }`
 
 ### 6.4 Request/Response Format Comparison
 
@@ -2003,8 +1921,8 @@ Three operations (plus breakpoints):
 | **URL** | `/playlists/startRadioShow` | `/flowsheet/join` |
 | **Method** | POST | POST |
 | **Content-Type** | `application/x-www-form-urlencoded` | `application/json` |
-| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <PAT>` |
-| **Body** | `djID=0&djName=Auto+DJ&djHandle=AutoDJ&showName=Auto+DJ&startingHour=1708300800000` | `{"dj_id": 42, "show_name": "Auto DJ"}` |
+| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <JWT>` (orchestrator) |
+| **Body** | `djID=0&djName=Auto+DJ&djHandle=AutoDJ&showName=Auto+DJ&startingHour=1708300800000` | `{"show_name": "Auto DJ"}` (orchestrator; `dj_id` resolved server-side) |
 | **Success response** | 302 with Location header | 200 JSON: `{"id": 789, ...}` |
 | **Show ID extraction** | Parse from Location header path | `response.id` |
 
@@ -2015,7 +1933,7 @@ Three operations (plus breakpoints):
 | **URL** | `/playlists/flowsheetEntryAdd` | `/flowsheet` |
 | **Method** | POST | POST |
 | **Content-Type** | `application/x-www-form-urlencoded` | `application/json` |
-| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <PAT>` |
+| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <JWT>` (orchestrator) |
 | **Body** | `radioShowID=123&workingHour=1708300800000&artistName=...&songTitle=...&releaseTitle=...&releaseType=otherRelease&autoBreakpoint=true` | `{"artist_name": "...", "album_title": "...", "track_title": "...", "request_flag": false}` |
 | **Success response** | 302 | 200 JSON |
 
@@ -2026,11 +1944,13 @@ Three operations (plus breakpoints):
 | **URL** | `/playlists/finishRadioShow` | `/flowsheet/end` |
 | **Method** | POST | POST |
 | **Content-Type** | `application/x-www-form-urlencoded` | `application/json` |
-| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <PAT>` |
-| **Body** | `radioShowID=123&mode=signoffConfirm` | `{"dj_id": 42}` |
+| **Auth** | `X-Auto-DJ-Key: <key>` | `Authorization: Bearer <JWT>` (orchestrator) |
+| **Body** | `radioShowID=123&mode=signoffConfirm` | (empty; orchestrator identified by service JWT) |
 | **Success response** | 302 | 200 JSON |
 
-### 6.5 Client Abstraction on Arduino
+### 6.5 Client Architecture on Arduino
+
+The Arduino uses a single `TubafrenzyBackend` implementation. The `FlowsheetBackend` interface is retained for testability (the `FakeClient` test harness implements it).
 
 ```mermaid
 classDiagram
@@ -2053,29 +1973,15 @@ classDiagram
         +addBreakpoint() bool
     }
 
-    class BackendServiceBackend {
-        -host: char*
-        -port: int
-        -bearerToken: char*
-        -djId: int
-        -showId: int
-        +startShow(showName: String) int
-        +addEntry(artist: String, title: String, album: String) bool
-        +endShow() bool
-        +addBreakpoint() bool
-    }
-
     class NetworkManager {
         +createClient() Client&
     }
 
     FlowsheetBackend <|.. TubafrenzyBackend
-    FlowsheetBackend <|.. BackendServiceBackend
     TubafrenzyBackend --> NetworkManager : uses
-    BackendServiceBackend --> NetworkManager : uses
 ```
 
-The state machine code calls the `FlowsheetBackend` interface. The config flag determines which implementation is instantiated at boot. Both accept `NetworkManager&` for transport-agnostic HTTP.
+The state machine code calls the `FlowsheetBackend` interface. `TubafrenzyBackend` accepts `NetworkManager&` for transport-agnostic HTTP. The `BackendServiceBackend` equivalent lives in the orchestrator (Node.js, not Arduino C++).
 
 ### 6.6 Show Lifecycle Differences
 
@@ -2083,13 +1989,13 @@ The state machine code calls the `FlowsheetBackend` interface. The config flag d
 |--------|-----------|----------------|
 | **Show ID source** | `radioShowID` from Location header redirect | `Show.id` from JSON response body |
 | **Hourly breakpoints** | Server auto-inserts via `autoBreakpoint=true` | Client must explicitly POST `{ "message": "BREAKPOINT" }` |
-| **DJ identity** | `djID=0` (string, no DJ table lookup) | `dj_id` is a real integer FK to the DJ table |
+| **DJ identity** | `djID=0` (string, no DJ table lookup) | Resolved server-side from orchestrator service identity |
 
 The `FlowsheetBackend` interface normalizes these differences:
 
 - **`startShow()`** returns an `int` show ID regardless of source.
 - **`addBreakpoint()`** is a no-op in `TubafrenzyBackend` (the server handles it via `autoBreakpoint=true`). In `BackendServiceBackend`, it POSTs the breakpoint entry explicitly.
-- The Arduino's `loop()` tracks hour boundaries and calls `addBreakpoint()` when the hour changes. This is harmless for tubafrenzy (no-op) and necessary for Backend-Service.
+- The Arduino's `loop()` tracks hour boundaries and calls `addBreakpoint()` when the hour changes. This is a no-op for the tubafrenzy client (server handles breakpoints via `autoBreakpoint=true`). The orchestrator handles breakpoints explicitly when writing to Backend-Service.
 
 ### 6.7 Testing Strategy
 
@@ -2140,7 +2046,7 @@ The management server and Backend-Service endpoints need their own tests, using 
 
 | Endpoint | Test Focus |
 |----------|-----------|
-| `POST /flowsheet/join` | Accepts Auto DJ service account (Bearer PAT); returns `Show` with `id`; rejects expired or invalid tokens |
+| `POST /flowsheet/join` | Accepts Auto DJ orchestrator service account (Bearer JWT); returns `Show` with `id`; resolves `dj_id` server-side from service identity; rejects expired or invalid tokens |
 | `POST /flowsheet` | Accepts `FlowsheetCreateSongFreeform` from Auto DJ; creates `FlowsheetSongEntry` linked to active show; accepts breakpoint message entry (`{"message": "BREAKPOINT"}`) |
 | `POST /flowsheet/end` | Ends the Auto DJ's active show; returns `Show` with `end_time` populated |
 | `GET /djs` | `is_automation` filter: `?is_automation=false` excludes Auto DJ; `?is_automation=true` returns only Auto DJ; unfiltered returns all |
@@ -2268,9 +2174,7 @@ Use `KVStore` (TDBStore on QSPI flash) for key-value persistence with wear level
 | `api_key` | `char[128]` | Remotely updatable tubafrenzy API key |
 | `poll_interval_ms` | `uint32_t` | Remotely tunable polling interval |
 | `utc_offset` | `int32_t` | Manual timezone override for human-readable display |
-| `flowsheet_backend` | `uint8_t` | `0` = tubafrenzy, `1` = Backend-Service |
-| `backend_service_token` | `char[256]` | Better Auth PAT for Backend-Service |
-| `backend_service_dj_id` | `int32_t` | DJ record ID in Backend-Service |
+| `flowsheet_backend` | `uint8_t` | Reserved for future use (currently always tubafrenzy) |
 
 **RuntimeConfig struct** (replaces scattered `#define` usage):
 
@@ -2282,9 +2186,6 @@ struct RuntimeConfig {
     uint32_t pollIntervalMs;
     int32_t utcOffsetSeconds;
     int32_t radioShowID;           // -1 = no active show
-    uint8_t flowsheetBackend;      // 0 = TUBAFRENZY, 1 = BACKEND_SERVICE
-    char backendServiceToken[256];
-    int32_t backendServiceDjId;
 };
 ```
 
@@ -2487,7 +2388,6 @@ flowchart TD
 |-----------|--------------------|-----------------------|
 | `wifi_pass` | **Critical.** Annual rotation bricks the device. | **Low urgency.** Only affects fallback transport. |
 | `api_key` | Critical. | **Still critical.** Used for flowsheet writes and management auth. |
-| `backend_service_token` | N/A | **Moderate.** Can be rotated via management server push. |
 
 **Protocol**: See Sections 4.6 (rotation protocol) and 4.7 (fallback and recovery).
 
@@ -2590,9 +2490,8 @@ flowchart LR
     P1 --> P3["Phase 3<br>WebSocket Mgmt"]
     P2 --> P3
     P2 --> WS["wxyc-shared<br>Auto DJ schemas"]
-    WS --> BS["Backend-Service<br>is_automation + auth"]
-    P2 --> DB["Arduino<br>Dual-Backend Client"]
-    BS --> DB
+    WS --> BS["Backend-Service<br>is_automation + service auth"]
+    BS --> ORCH["Orchestrator<br>Backend-Service client"]
     P3 --> P4["Phase 4<br>Credential Rotation"]
     P3 --> P5["Phase 5<br>OTA Updates"]
 ```
@@ -2603,8 +2502,8 @@ flowchart LR
 | **1: Persistent Storage** | Survive power cycles; runtime config struct replaces `#define` soup | Phase 0 (should land first, but no hard dependency) |
 | **2: Ethernet Shield** | Stable primary transport; WiFi becomes fallback; network abstraction layer | Phase 0 (should land first, but no hard dependency) |
 | **wxyc-shared schemas** | Auto DJ types in `api.yaml`; `@wxyc/shared/auto-dj` entry point | Phase 2 (needs network abstraction for dual-backend) |
-| **Backend-Service setup** | `is_automation` column, Auto DJ DJ record, service account auth | wxyc-shared schemas |
-| **Arduino dual-backend** | `FlowsheetBackend` abstraction; Backend-Service client | Phase 2 + Backend-Service setup |
+| **Backend-Service setup** | `is_automation` column, Auto DJ DJ record, orchestrator service account auth | wxyc-shared schemas |
+| **Orchestrator Backend-Service client** | Orchestrator flowsheet write pipeline (JWT auth, dual-backend targeting) | Backend-Service setup |
 | **3: WebSocket Management** | Real-time remote visibility and control | Phases 1 + 2 |
 | **4: Credential Rotation** | Remotely update credentials without reflashing | Phase 3 |
 | **5: OTA Updates** | Remotely deploy new firmware over Ethernet | Phases 1 + 3 |
@@ -2637,9 +2536,9 @@ flowchart LR
 
 11. **Centrifugo reconnection:** The Arduino must handle WebSocket reconnection itself (the `ArduinoWebsockets` library does not have built-in reconnection with backoff). Implement exponential backoff in the `AzuraCastClient` -- e.g., 1s, 2s, 4s, 8s, capped at 60s. During reconnection, fall back to HTTP polling. The `recover: true` subscription flag tells Centrifugo to replay missed messages on reconnect ([source](https://gist.github.com/Moonbase59/d42f411e10aff6dc58694699010307aa)).
 
-12. **Backend-Service `show_id` tracking:** Does Backend-Service track the active show per DJ internally (so the Arduino doesn't need to pass `show_id` on every `POST /flowsheet` call), or does the Arduino need to include it? The current `api.yaml` schema for `FlowsheetCreateSongFreeform` does not include `show_id`, which suggests the server tracks it.
+12. **Backend-Service `show_id` tracking:** Does Backend-Service track the active show per DJ internally (so the orchestrator doesn't need to pass `show_id` on every `POST /flowsheet` call), or does the orchestrator need to include it? The current `api.yaml` schema for `FlowsheetCreateSongFreeform` does not include `show_id`, which suggests the server tracks it.
 
-13. ~~**Backend-Service `autoBreakpoint` equivalent**~~: **Resolved.** Backend-Service supports `entry_type: 'breakpoint'` (type code 8, "hour marker") but has no automatic insertion like tubafrenzy's `autoBreakpoint=true`. When targeting Backend-Service, the Arduino must explicitly POST a breakpoint entry at the top of each hour. [Section 6.6](#66-show-lifecycle-differences) documents this.
+13. ~~**Backend-Service `autoBreakpoint` equivalent**~~: **Resolved.** Backend-Service supports `entry_type: 'breakpoint'` (type code 8, "hour marker") but has no automatic insertion like tubafrenzy's `autoBreakpoint=true`. When targeting Backend-Service, the orchestrator must explicitly POST a breakpoint entry at the top of each hour. [Section 6.6](#66-show-lifecycle-differences) documents this.
 
 14. ~~**wxyc-shared entry point**~~: **Decided** -- new entry point `@wxyc/shared/auto-dj`. Keeps import footprint small for consumers that don't need Auto DJ types. Requires a new entry in `tsup.config.ts` and `package.json` exports.
 
