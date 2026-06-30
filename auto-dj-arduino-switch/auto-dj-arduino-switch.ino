@@ -30,11 +30,14 @@ Context ctx = { BOOTING, false, false, TRANSPORT_NONE, false, 0, 0 };
 // Telemetry
 unsigned int reconnectCount = 0;
 unsigned int buttonPressCount = 0;  // HTTP-fallback parity; reset after each heartbeat
-unsigned long loopMaxMs = 0;
+unsigned long loopMaxMs = 0;        // max loop() duration since the last heartbeat
+unsigned long lastReconnectAttemptMs = 0;
 
 // ========== Modules ==========
 
-RelayMonitor relayMonitor(RELAY_PIN, STATUS_LED_PIN, DEBOUNCE_MS);
+// ledPin = -1: the state machine owns STATUS_LED_PIN (it factors in the
+// orchestrator-reported active flag), so the relay monitor must not also drive it.
+RelayMonitor relayMonitor(RELAY_PIN, -1, DEBOUNCE_MS);
 ButtonMonitor buttonMonitor(BUTTON_PIN, DEBOUNCE_MS);
 WifiManager wifiManager(WIFI_SSID, WIFI_PASS, WIFI_RETRY_INTERVAL_MS);
 MgmtClient mgmt(ORCHESTRATOR_HOST, ORCHESTRATOR_PORT, ORCHESTRATOR_WS_PATH,
@@ -83,9 +86,11 @@ void setup() {
     relayMonitor.setUp();
     buttonMonitor.setUp();
     wifiManager.setUp();
+    mgmt.setUp();  // register auth header + callbacks once
 
     if (wifiManager.isConnected() && mgmt.connectWs()) {
         reconnectCount++;
+        lastReconnectAttemptMs = millis();
     }
 }
 
@@ -102,8 +107,12 @@ void loop() {
     bool wifiUp = wifiManager.isConnected();
     bool channelUp = mgmt.channelUp();
 
-    // Reconnect the management channel if the network is up but the channel dropped.
-    if (wifiUp && !channelUp) {
+    // Reconnect the management channel if the network is up but the channel
+    // dropped — rate-limited so a refusing/down orchestrator can't be hammered
+    // every loop iteration (connect() returns immediately when refused).
+    if (wifiUp && !channelUp &&
+        (millis() - lastReconnectAttemptMs >= WIFI_RETRY_INTERVAL_MS)) {
+        lastReconnectAttemptMs = millis();
         if (mgmt.connectWs()) {
             reconnectCount++;
             channelUp = mgmt.channelUp();
@@ -147,13 +156,13 @@ void loop() {
     if (r.sendHeartbeat) {
         mgmt.send(buildHeartbeat(makeHeartbeat(ctx, in)));
         buttonPressCount = 0;  // reset the parity counter after reporting
+        loopMaxMs = 0;         // reset the loop-latency max so it tracks per-interval
     }
     if (r.doRestart) {
         NVIC_SystemReset();
     }
-    if (r.setLed >= 0) {
-        digitalWrite(STATUS_LED_PIN, r.setLed ? HIGH : LOW);
-    }
+    // tick() always sets setLed to 0/1 (the state machine owns STATUS_LED_PIN).
+    digitalWrite(STATUS_LED_PIN, r.setLed ? HIGH : LOW);
     if (r.delayMs > 0) {
         delay(r.delayMs);
     }

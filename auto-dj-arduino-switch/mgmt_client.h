@@ -17,7 +17,10 @@ public:
     MgmtClient(const char* host, int port, const char* wsPath, const char* hbPath,
                const char* cmdPath, const char* authKey, bool useTls);
 
-    /** Open the WebSocket and register callbacks. Returns true on success. */
+    /** Register the auth header + callbacks once (before the first connectWs). */
+    void setUp();
+
+    /** Open the WebSocket. Returns true on success. Safe to call repeatedly. */
     bool connectWs();
 
     /** Pump the WebSocket receive loop. Call every loop iteration. */
@@ -53,11 +56,20 @@ private:
 
     websockets::WebsocketsClient ws;
     bool connected = false;
+    bool setUpDone = false;
 
-    // Single-slot inboxes filled by onMessage(), drained by the .ino.
-    bool pendingCommand = false;
-    CommandAction pendingAction = CMD_NONE;
-    String pendingId;
+    // FIFO command inbox: ws.poll() can dispatch several frames in one call (e.g.
+    // after a reconnect), so a single slot would drop all but the last command.
+    static const int COMMAND_QUEUE_SIZE = 8;
+    struct PendingCommand {
+        CommandAction action;
+        String id;
+    };
+    PendingCommand commandQueue[COMMAND_QUEUE_SIZE];
+    int commandHead = 0;
+    int commandCount = 0;
+
+    // Latest active flag is single-slot — only the most recent matters for the LED.
     bool pendingActiveResult = false;
     bool pendingActive = false;
 };

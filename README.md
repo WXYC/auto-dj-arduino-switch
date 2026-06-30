@@ -25,47 +25,34 @@ A management server will sit between AzuraCast and the Arduino, subscribing to A
 
 ```mermaid
 flowchart LR
-    MB["Mixing Board<br>AUX Relay"] -->|D2 pin| ARD
-
-    subgraph Ethernet["Ethernet (primary)"]
-        direction LR
-        AZ["AzuraCast<br>Centrifugo"] -->|Real-time<br>track updates| MGT["Management<br>Server"]
-        MGT <-->|WebSocket:<br>now_playing,<br>commands,<br>heartbeats,<br>error reports| ARD["Arduino<br>Giga R1 WiFi +<br>Ethernet Shield"]
-    end
-
-    ARD -->|Start show,<br>add entries,<br>end show| TF["tubafrenzy<br>Flowsheet API"]
-
-    subgraph WiFi["WiFi (fallback)"]
-        direction LR
-        ARD -.->|Direct polling<br>every 20s| AZ2["AzuraCast<br>JSON API"]
-        ARD -.->|HTTP heartbeat +<br>command poll| MGT2["Management<br>Server"]
-    end
+    MB["Mixing Board<br>AUX Relay"] -->|D2| ARD
+    BTN["Toggle button"] -->|D5| ARD
+    ARD["Arduino Giga R1 WiFi<br>(+ Ethernet Shield, Phase 2)"]
+    ARD <-->|"WS mgmt channel<br>(heartbeat, button_toggle,<br>ack, commands)<br>HTTP fallback over WiFi"| ORCH["auto-dj-orchestrator"]
+    ORCH <-->|now-playing| AZ["AzuraCast"]
+    ORCH -->|flowsheet writes| BS["Backend-Service<br>(mirrors to tubafrenzy)"]
 ```
 
-See [docs/networking-spec.md](docs/networking-spec.md) for the comprehensive networking specification (all protocols, both backends, credentials, shared types, and implementation phases). The [original roadmap](docs/remote-access-roadmap.md) is preserved for git history.
+See [docs/networking-spec.md](docs/networking-spec.md) for the comprehensive networking specification (all protocols, authentication, shared types, and implementation phases). The [original roadmap](docs/remote-access-roadmap.md) is preserved for git history.
 
 ## State Machine
+
+In the reporter model the state machine tracks connectivity only (it no longer runs a show lifecycle). It reports the relay level + button presses to the orchestrator and drives the status LED; `tick()` stays pure.
 
 ```mermaid
 stateDiagram-v2
     [*] --> BOOTING
-    BOOTING --> CONNECTING_WIFI
-    CONNECTING_WIFI --> IDLE
-    IDLE --> STARTING_SHOW : Relay closed<br>(auto DJ active)
-    STARTING_SHOW --> AUTO_DJ_ACTIVE
-    AUTO_DJ_ACTIVE --> ENDING_SHOW : Relay opened<br>(DJ is live)
-    ENDING_SHOW --> IDLE
-
-    state AUTO_DJ_ACTIVE {
-        [*] --> TrackDetection
-        TrackDetection : Receives push updates (Ethernet)<br>or polls AzuraCast (WiFi fallback),<br>adds flowsheet entries
-    }
+    BOOTING --> CONNECTING
+    CONNECTING --> CONNECTED : link up + channel up
+    CONNECTING --> ERROR_STATE : retries exhausted
+    CONNECTED --> CONNECTING : channel dropped
+    ERROR_STATE --> CONNECTING : link returns
 ```
 
-- **IDLE:** Relay open (DJ is live). Waiting for auto DJ activation.
-- **STARTING_SHOW:** Relay closed. Creating a new show on tubafrenzy.
-- **AUTO_DJ_ACTIVE:** Receiving push updates (Ethernet) or polling AzuraCast (WiFi fallback), writing flowsheet entries. Server handles hourly breakpoints via `autoBreakpoint=true`.
-- **ENDING_SHOW:** Relay opened. Signing off the show on tubafrenzy.
+- **BOOTING:** Pre-transport.
+- **CONNECTING:** Bringing up a transport (Ethernet WS primary, WiFi fallback) and the management channel; covers the WiFi reconnect window.
+- **CONNECTED:** A transport + the management channel are up. Reports relay changes and button presses, sends periodic heartbeats, handles commands (pause/resume/ping/restart), and drives the LED from the orchestrator-reported active flag.
+- **ERROR_STATE:** Transport setup failed repeatedly; back off and retry.
 
 ## Hardware
 
@@ -111,11 +98,11 @@ cp auto-dj-arduino-switch/secrets.h.example auto-dj-arduino-switch/secrets.h
 
 Edit `secrets.h` with:
 - UNC-PSK WiFi password
-- Auto DJ API key (must match the `AUTO_DJ_API_KEY` env var on the tubafrenzy server)
+- `AUTO_DJ_KEY` (must match the orchestrator's `AUTO_DJ_KEY` env var)
 
-### 4. Server-side configuration
+### 4. Orchestrator-side configuration
 
-Set the `AUTO_DJ_API_KEY` environment variable on the tubafrenzy server (wxyc.info). The Arduino authenticates via the `X-Auto-DJ-Key` HTTP header, which is checked by `XYCCatalogServlet.validateControlRoomAccess()`.
+Set the `AUTO_DJ_KEY` environment variable on the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator). The Arduino sends it as the `X-Auto-DJ-Key` header on the WebSocket upgrade (and the HTTP fallback), which the orchestrator validates with a timing-safe compare.
 
 ### 5. Upload
 
@@ -129,10 +116,9 @@ Connect the mixing board's AUX relay contact to pin D2 and GND. See [docs/wiring
 
 Edit `config.h` to change:
 
-- Pin assignments
-- Polling interval (default 20s)
-- Server hostnames and ports
-- Auto DJ identity (DJ name, handle)
+- Pin assignments (`RELAY_PIN`, `STATUS_LED_PIN`, `BUTTON_PIN`)
+- Heartbeat / poll intervals
+- Orchestrator host, port, paths, and `ORCHESTRATOR_USE_TLS`
 - NTP server and timezone offset
 
 ## Serial Monitor
@@ -147,25 +133,24 @@ The UNC-PSK password changes yearly. Update `secrets.h` and re-upload the sketch
 
 ### API key rotation
 
-To rotate the API key, update both:
-1. `secrets.h` on the Arduino
-2. `AUTO_DJ_API_KEY` env var on the tubafrenzy server
+To rotate the key, update both:
+1. `AUTO_DJ_KEY` in `secrets.h` on the Arduino
+2. `AUTO_DJ_KEY` env var on the orchestrator
 
 ## Running Tests
 
 Sketch modules are tested on desktop using GoogleTest with an Arduino shim layer. No Arduino hardware or SDK required. The shim provides `String`, `Print`, `Stream`, `Client`, GPIO stubs, and controllable `millis()`. Real ArduinoHttpClient and ArduinoJson libraries are compiled against the shim via CMake FetchContent.
 
-**82 tests** cover:
+**49 tests** cover:
 
-| Module | Tests | Technique |
-|--------|-------|-----------|
-| `utils.h` | 19 | Pure functions (urlEncode, parseRadioShowID, currentHourMs) |
-| `state_machine.h` | 32 | Pure function tick(): state transitions, retries, WiFi loss |
-| `relay_monitor.h` | 12 | Parameterized `update(millis, reading)` bypasses GPIO |
-| `azuracast_client.h` | 9 | `poll(Client&)` with FakeClient pre-loaded HTTP/JSON responses |
-| `flowsheet_client.h` | 10 | `Client&` injection, request body assertions, 302/500 handling |
+| Module | Technique |
+|--------|-----------|
+| `state_machine.h` | Pure `tick()`: connectivity transitions, retries/backoff, command handling, LED policy, heartbeat timing |
+| `button_monitor.h` | Parameterized `update(millis, reading)` debounce (press-edge), bypasses GPIO |
+| `relay_monitor.h` | Parameterized `update(millis, reading)` debounce, bypasses GPIO |
+| `mgmt_protocol.h` | Pure ArduinoJson assembly (heartbeat/button_toggle/ack) + parsing (command, ack-result) |
 
-The I/O modules use dependency injection: `Client&` parameters replace hardcoded `WiFiSSLClient` creation, and `RelayMonitor::update(millis, reading)` replaces `digitalRead()`/`millis()` calls. The `.ino` orchestrator creates `WiFiSSLClient` at each call site and passes it in.
+`mgmt_client.cpp` (the WebSocket / HTTP-fallback I/O) is excluded from the desktop build — it `#include <ArduinoWebsockets.h>`, which is not available in CI — so all assembly/parsing lives in the pure `mgmt_protocol` module above.
 
 ```bash
 cmake -B test/build test/

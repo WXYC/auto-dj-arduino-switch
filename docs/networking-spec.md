@@ -4,9 +4,11 @@ This document specifies all network communication for the Auto DJ Arduino Switch
 
 ## 1. Overview
 
+> **Re-architecture note (reporter model).** The Arduino is now a **relay/button reporter**: it reports the AUX-relay state and a manual toggle button to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) over the management channel and no longer polls AzuraCast or writes flowsheets. The orchestrator owns the AzuraCast subscription and all flowsheet writes (to Backend-Service, which mirrors to tubafrenzy). Sections describing the Arduino polling AzuraCast or writing to tubafrenzy directly (notably §1.2, §2.3, §2.5, §3.2–§3.4, §6) are **historical / now orchestrator-side**; the authoritative parts for the firmware are the management channel (§3.6–§3.8), activation sources (§2.7), and the type contracts (§5).
+
 ### 1.1 Purpose
 
-The Auto DJ Arduino Switch is a networked embedded device that bridges WXYC's auto DJ system ([AzuraCast](https://www.azuracast.com/)) with the station's flowsheet. It makes outbound HTTPS calls to two different servers and maintains a persistent WebSocket connection to a management server. This document is the single source of truth for all of that network traffic.
+The Auto DJ Arduino Switch is a networked embedded device that reports studio state (the AUX relay + a manual button) to the auto-dj-orchestrator, which bridges WXYC's auto DJ system ([AzuraCast](https://www.azuracast.com/)) with the station's flowsheet. This document is the source of truth for the auto-DJ network traffic.
 
 ### 1.2 Problem Statement
 

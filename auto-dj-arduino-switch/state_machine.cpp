@@ -30,13 +30,13 @@ TickResult tick(const Context& ctx, const Inputs& in) {
             break;
 
         case CONNECTING:
-            if (in.ethernetLinkUp && in.channelUp) {
+            // CONNECTED requires a usable management channel (Phase 1 runs the
+            // WS over either transport). Prefer Ethernet when its link is up, but
+            // fall back to WiFi even if the Ethernet link is up but its channel
+            // never came up.
+            if (in.channelUp && (in.ethernetLinkUp || in.wifiConnected)) {
                 r.context.state = CONNECTED;
-                r.context.transport = TRANSPORT_ETHERNET;
-                r.context.retryCount = 0;
-            } else if (!in.ethernetLinkUp && in.wifiConnected) {
-                r.context.state = CONNECTED;
-                r.context.transport = TRANSPORT_WIFI;
+                r.context.transport = in.ethernetLinkUp ? TRANSPORT_ETHERNET : TRANSPORT_WIFI;
                 r.context.retryCount = 0;
             } else {
                 int rc = ctx.retryCount + 1;
@@ -51,9 +51,12 @@ TickResult tick(const Context& ctx, const Inputs& in) {
             break;
 
         case CONNECTED: {
-            bool stillConnected =
-                (ctx.transport == TRANSPORT_ETHERNET && in.ethernetLinkUp && in.channelUp) ||
-                (ctx.transport == TRANSPORT_WIFI && in.wifiConnected);
+            // Still connected only while BOTH the link and the management channel
+            // are up. A WS drop (channelUp=false) returns to CONNECTING so the
+            // reconnect/backoff path engages instead of silently dropping sends.
+            bool linkUp =
+                ctx.transport == TRANSPORT_ETHERNET ? in.ethernetLinkUp : in.wifiConnected;
+            bool stillConnected = linkUp && in.channelUp;
             if (!stillConnected) {
                 r.context.state = CONNECTING;
                 r.context.transport = TRANSPORT_NONE;

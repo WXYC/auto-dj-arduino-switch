@@ -10,7 +10,11 @@ MgmtClient::MgmtClient(const char* host, int port, const char* wsPath, const cha
     : host(host), port(port), wsPath(wsPath), hbPath(hbPath), cmdPath(cmdPath),
       authKey(authKey), useTls(useTls) {}
 
-bool MgmtClient::connectWs() {
+void MgmtClient::setUp() {
+    if (setUpDone) return;
+    // Register the auth header + callbacks ONCE. addHeader() appends to a vector
+    // that connect() does not clear, so calling it per-reconnect would leak RAM
+    // and inflate the upgrade request until the handshake eventually fails.
     ws.addHeader("X-Auto-DJ-Key", authKey);
     ws.onMessage([this](WebsocketsMessage msg) { onMessage(msg.data()); });
     ws.onEvent([this](WebsocketsEvent event, String) {
@@ -18,7 +22,11 @@ bool MgmtClient::connectWs() {
             connected = false;
         }
     });
+    setUpDone = true;
+}
 
+bool MgmtClient::connectWs() {
+    setUp();  // idempotent guard in case the caller forgot
     String scheme = useTls ? "wss://" : "ws://";
     String url = scheme + String(host) + ":" + String(port) + String(wsPath);
     connected = ws.connect(url);
@@ -40,9 +48,14 @@ void MgmtClient::send(const String& payload) {
 void MgmtClient::onMessage(const String& raw) {
     ParsedCommand cmd = parseCommand(raw);
     if (cmd.valid) {
-        pendingCommand = true;
-        pendingAction = cmd.action;
-        pendingId = cmd.id;
+        if (commandCount < COMMAND_QUEUE_SIZE) {
+            int tail = (commandHead + commandCount) % COMMAND_QUEUE_SIZE;
+            commandQueue[tail].action = cmd.action;
+            commandQueue[tail].id = cmd.id;
+            commandCount++;
+        }
+        // If the queue is full, the oldest commands are still drained first; a
+        // dropped command is at worst an un-acked no-op the orchestrator retries.
         return;
     }
     ParsedAckResult ack = parseAckResult(raw);
@@ -53,10 +66,11 @@ void MgmtClient::onMessage(const String& raw) {
 }
 
 bool MgmtClient::takeCommand(CommandAction* action, String* id) {
-    if (!pendingCommand) return false;
-    *action = pendingAction;
-    *id = pendingId;
-    pendingCommand = false;
+    if (commandCount == 0) return false;
+    *action = commandQueue[commandHead].action;
+    *id = commandQueue[commandHead].id;
+    commandHead = (commandHead + 1) % COMMAND_QUEUE_SIZE;
+    commandCount--;
     return true;
 }
 
