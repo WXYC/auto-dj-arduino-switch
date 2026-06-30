@@ -1348,7 +1348,7 @@ AutoDJHeartbeat:
       enum: [heartbeat]
     state:
       type: string
-      enum: [BOOTING, CONNECTING_WIFI, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW, ERROR_STATE]
+      enum: [BOOTING, CONNECTING, CONNECTED, ERROR_STATE]  # reporter firmware: connectivity states only
     transport:
       type: string
       enum: [ethernet, wifi]
@@ -1514,7 +1514,7 @@ AutoDJErrorReport:
       type: string
     state:
       type: string
-      enum: [BOOTING, CONNECTING_WIFI, IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW, ERROR_STATE]
+      enum: [BOOTING, CONNECTING, CONNECTED, ERROR_STATE]  # reporter firmware: connectivity states only
     uptime_s:
       type: integer
     free_ram:

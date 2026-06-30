@@ -1,18 +1,22 @@
 # Auto DJ Arduino Switch
 
-An Arduino Giga R1 WiFi sketch that bridges the gap between WXYC's auto DJ system ([AzuraCast](https://remote.wxyc.org)) and the station's flowsheet ([tubafrenzy](https://www.wxyc.info)). When no live DJ is broadcasting, the Arduino detects this via a relay contact on the mixing board, polls AzuraCast for currently-playing track data, and writes entries to the tubafrenzy flowsheet. A planned management server will relay AzuraCast's real-time Centrifugo feed over Ethernet, replacing polling with push-based updates (see [roadmap](docs/remote-access-roadmap.md)).
+An Arduino Giga R1 WiFi sketch that **reports** the mixing board's AUX relay state and a manual toggle button to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) over a WebSocket management channel (HTTP fallback over WiFi). The orchestrator owns all activation logic — it subscribes to AzuraCast and writes the flowsheet (to Backend-Service, which mirrors to tubafrenzy). This board is a "dumb" reporter: it reports inputs and drives a status LED.
+
+> **Note:** Earlier firmware wrote tracks to tubafrenzy directly. That responsibility now lives in the orchestrator; the Arduino no longer polls AzuraCast or writes flowsheets. See [docs/networking-spec.md](docs/networking-spec.md).
 
 ## Why?
 
-When auto DJ is playing and no DJ is logged into the flowsheet, those tracks are not recorded in WXYC's playback history. This device fills that gap automatically.
+When auto DJ is playing and no DJ is logged into the flowsheet, those tracks are not recorded in WXYC's playback history. The orchestrator fills that gap; this device tells it when the auto DJ is on the air (relay) and lets an operator toggle it manually (button).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    MB["Mixing Board<br>AUX Relay<br>(dry contact)"] -->|D2 pin| ARD["Arduino Giga R1 WiFi<br>Detects auto DJ active<br>via relay on D2"]
-    ARD <-->|Now Playing API| AZ["AzuraCast<br>remote.wxyc.org"]
-    ARD -->|Start show, add entries,<br>end show| TF["tubafrenzy<br>Flowsheet API<br>(wxyc.info)"]
+    MB["Mixing Board<br>AUX Relay<br>(dry contact)"] -->|D2 pin| ARD["Arduino Giga R1 WiFi<br>Reports relay + button"]
+    BTN["Toggle button"] -->|D5 pin| ARD
+    ARD <-->|"WS mgmt channel<br>(HTTP fallback)"| ORCH["auto-dj-orchestrator"]
+    ORCH <-->|Now Playing| AZ["AzuraCast<br>remote.wxyc.org"]
+    ORCH -->|join / entry / end| BS["Backend-Service<br>(mirrors to tubafrenzy)"]
 ```
 
 ### Planned Architecture

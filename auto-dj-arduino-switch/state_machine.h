@@ -3,81 +3,100 @@
 
 #include <Arduino.h>
 
-// ========== State Machine Types ==========
+// ========== Reporter state machine ==========
+//
+// The Arduino is a relay/button reporter: it no longer starts/ends shows,
+// polls AzuraCast, or writes flowsheets. All activation logic lives in the
+// auto-dj-orchestrator. The state machine tracks connectivity and drives the
+// status LED; tick() stays pure (no Serial / sockets / delay).
 
 enum State {
-    BOOTING,
-    CONNECTING_WIFI,
-    IDLE,
-    STARTING_SHOW,
-    AUTO_DJ_ACTIVE,
-    ENDING_SHOW,
-    ERROR_STATE
+    BOOTING,      // pre-transport
+    CONNECTING,   // bringing up a transport (Ethernet WS or WiFi HTTP)
+    CONNECTED,    // a transport is up and the management channel is usable
+    ERROR_STATE   // transport setup failed repeatedly; back off and retry
 };
 
-/**
- * Persisted state carried across ticks.
- */
+enum Transport {
+    TRANSPORT_NONE,
+    TRANSPORT_ETHERNET,
+    TRANSPORT_WIFI
+};
+
+enum CommandAction {
+    CMD_NONE,
+    CMD_SET_CONFIG,
+    CMD_PAUSE,
+    CMD_RESUME,
+    CMD_END_SHOW,
+    CMD_RESTART,
+    CMD_PING,
+    CMD_UNKNOWN
+};
+
+enum AckStatus {
+    ACK_OK,
+    ACK_ERROR,
+    ACK_UNKNOWN_COMMAND
+};
+
+/** Persisted state carried across ticks. */
 struct Context {
     State state;
-    int radioShowID;
-    int retryCount;
-    unsigned long lastPollTime;
+    bool relayAutoDJActive;   // last debounced relay level (true = relay reports auto-DJ-active)
+    bool orchestratorActive;  // last orchestrator-reported active flag (for the LED)
+    Transport transport;
+    bool channelUp;           // management channel connected + authed
+    int retryCount;           // transport (re)connect attempts, for ERROR backoff
+    unsigned long lastHeartbeatMs;
 };
 
-/**
- * Per-tick snapshot of sensor state, I/O results, and configuration.
- * The orchestrator fills this before calling tick().
- */
+/** Per-tick snapshot filled by the .ino orchestrator before calling tick(). */
 struct Inputs {
-    // Sensor / network state
-    bool relayStateChanged;
-    bool autoDJActive;
+    // Inputs from the debounced monitors
+    bool relayChanged;        // relay debounced edge this tick
+    bool relayAutoDJActive;   // current debounced relay level
+    bool buttonPressed;       // button debounced press edge this tick
+
+    // Transport / channel facts
+    bool ethernetLinkUp;
     bool wifiConnected;
-    unsigned long epochTime;
+    bool channelUp;           // management channel currently connected + authed
+
+    // Inbound-message facts (parsed by mgmt_protocol, passed in flat)
+    bool gotCommand;
+    CommandAction commandAction;
+    bool gotActiveResult;     // an ack/command carried result.active
+    bool activeResult;
+
+    // Timing / config
     unsigned long currentMillis;
-
-    // I/O results (filled by orchestrator for the current state)
-    int startShowResult;    // radioShowID or -1 on failure
-    bool endShowResult;     // success?
-    bool pollNewTrack;      // new track detected?
-    bool pollLiveDJ;        // live DJ streaming?
-    String artist;
-    String title;
-    String album;
-
-    // Config constants (avoids #define dependency in pure code)
-    unsigned long pollIntervalMs;
-    int maxRetries;
+    unsigned long heartbeatIntervalMs;
     unsigned long retryBackoffMs;
+    int maxRetries;
 };
 
-/**
- * Output from tick(): updated context plus post-transition actions.
- */
+/** Output from tick(): updated context plus actions for the orchestrator. */
 struct TickResult {
     Context context;
 
-    // Post-transition actions for the orchestrator
-    bool addEntry;
-    unsigned long addEntryHourMs;
-    String addEntryArtist;
-    String addEntryTitle;
-    String addEntryAlbum;
+    bool sendHeartbeat;
+    bool sendButtonToggle;
+    bool sendAck;
+    AckStatus ackStatus;
+    bool doRestart;
+    int setLed;               // -1 = leave, 0 = off, 1 = on
 
-    unsigned long delayMs;
+    unsigned long delayMs;    // ERROR backoff only
 };
 
 /**
- * Pure state machine transition function. Takes current context and a snapshot
- * of inputs; returns updated context and any actions for the orchestrator to
- * execute. Has no side effects (no Serial, WiFi, GPIO, or HTTP).
+ * Pure transition function. No I/O, no global state, no delay(). All sends are
+ * requests in TickResult; the .ino performs them.
  */
 TickResult tick(const Context& ctx, const Inputs& inputs);
 
-/**
- * Returns a human-readable name for the given state.
- */
+/** Human-readable state name. */
 const char* stateName(State s);
 
 #endif

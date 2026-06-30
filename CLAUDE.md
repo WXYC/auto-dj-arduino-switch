@@ -1,6 +1,6 @@
 # Auto DJ Arduino Switch
 
-Arduino Giga R1 WiFi + Ethernet Shield Rev2 that bridges WXYC's auto DJ (AzuraCast) with the tubafrenzy flowsheet. When no live DJ is broadcasting, the Arduino detects this via a relay contact and writes currently-playing tracks to the flowsheet.
+Arduino Giga R1 WiFi + Ethernet Shield Rev2 that **reports** the mixing board's AUX relay state and a manual toggle button to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) over a WebSocket management channel (HTTP fallback over WiFi). It is a "dumb" reporter: the orchestrator owns all activation logic, subscribes to AzuraCast, and writes the flowsheet. This board only reports inputs and drives the status LED.
 
 ## Repository Layout
 
@@ -16,20 +16,19 @@ docs/                     Specifications and reference docs
 
 - **Language:** C++ (Arduino, C++14 for tests)
 - **Board:** Arduino Giga R1 WiFi (Mbed OS GIGA board package)
-- **Architecture:** Pure-function state machine. `tick()` takes `Context` + `Inputs`, returns `TickResult` with updated context + actions. The `.ino` `loop()` is a thin I/O orchestrator.
-- **Config:** `config.h` (pin assignments, timing, server endpoints), `secrets.h` (WiFi password, API key -- gitignored)
-- **Libraries:** ArduinoHttpClient, ArduinoJson v7+
+- **Architecture:** Pure-function state machine (connectivity + LED, no show lifecycle). `tick()` takes `Context` + `Inputs`, returns `TickResult` with updated context + actions. The `.ino` `loop()` is a thin I/O orchestrator.
+- **Config:** `config.h` (pin assignments, timing, orchestrator endpoints), `secrets.h` (WiFi password, `AUTO_DJ_KEY` -- gitignored)
+- **Libraries:** ArduinoWebsockets, ArduinoHttpClient, ArduinoJson v7+
 
 ### Key files
 
 | File | Role |
 |------|------|
-| `state_machine.h/.cpp` | Pure `tick()` function: all decision logic |
-| `utils.h/.cpp` | `urlEncode`, `parseRadioShowID`, `currentHourMs` |
-| `azuracast_client.h/.cpp` | AzuraCast Now Playing API client |
-| `flowsheet_client.h/.cpp` | tubafrenzy flowsheet API client |
+| `state_machine.h/.cpp` | Pure `tick()`: connectivity transitions, command handling, LED policy |
 | `relay_monitor.h/.cpp` | Debounced relay input |
-| `button_monitor.h/.cpp` | Debounced manual toggle button input |
+| `button_monitor.h/.cpp` | Debounced manual toggle button input (press-edge) |
+| `mgmt_protocol.h/.cpp` | **Pure** management-channel JSON: heartbeat/button_toggle/ack assembly, command/ack-result parse (desktop-tested) |
+| `mgmt_client.h/.cpp` | I/O wrapper: WebSocket (Ethernet) + HTTP poll (WiFi). Delegates all JSON to `mgmt_protocol`. **Not CI-compiled** (pulls in `ArduinoWebsockets.h`) |
 | `wifi_manager.h/.cpp` | WiFi connection management |
 | `config.h` | All compile-time constants |
 
@@ -45,7 +44,7 @@ cd test/build && ctest --output-on-failure
 
 CI runs on every push/PR to `main` via `.github/workflows/test.yml`.
 
-When adding new pure-logic functions, extract them into `utils.h` or `state_machine.h` so they can be tested on desktop. I/O-performing code stays in the `.ino` file and the `*_client` modules.
+When adding new pure logic, put it in `state_machine.h` or `mgmt_protocol.h` so it can be tested on desktop. I/O-performing code stays in the `.ino` and `mgmt_client`. **`mgmt_client.cpp` is deliberately excluded from the CMake build** (it `#include <ArduinoWebsockets.h>`, unavailable in CI); keep all assembly/parsing in `mgmt_protocol` so the WS library's absence costs no coverage, and never include `mgmt_client.h` from `state_machine.h` / `button_monitor.h`.
 
 ## Enclosure (`enclosure/`)
 

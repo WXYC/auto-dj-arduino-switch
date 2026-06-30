@@ -1,43 +1,46 @@
 /**
- * Auto DJ Arduino Switch
+ * Auto DJ Arduino Switch -- relay/button reporter
  *
- * Monitors the WXYC mixing board's AUX relay contact to detect when the
- * auto DJ system (AzuraCast/Liquidsoap at remote.wxyc.org) is active.
- * When active, polls AzuraCast for currently-playing track data and writes
- * entries to the tubafrenzy flowsheet (wxyc.info), bridging the gap in
- * the station's playback history.
+ * Reports the mixing board's AUX relay state and a manual toggle button to the
+ * auto-dj-orchestrator over a WebSocket management channel (HTTP fallback over
+ * WiFi). The orchestrator owns all activation logic and flowsheet writes; this
+ * board only reports inputs and drives the status LED.
  *
- * Hardware: Arduino Giga R1 WiFi
+ * Hardware: Arduino Giga R1 WiFi (+ Ethernet Shield Rev2, Phase 2)
  * Wiring:   See docs/wiring.md
  *
- * Architecture: The loop() function is a thin orchestrator that performs I/O
- * and delegates all transition/retry logic to the pure tick() function in
- * state_machine.h. See test/test_state_machine.cpp for the full test suite.
+ * Architecture: loop() is a thin I/O orchestrator that delegates all decision
+ * logic to the pure tick() in state_machine.h and all JSON to mgmt_protocol.h.
+ * See test/ for the desktop test suite.
  */
 
 #include "config.h"
 #include "secrets.h"
 #include "relay_monitor.h"
+#include "button_monitor.h"
 #include "wifi_manager.h"
-#include "azuracast_client.h"
-#include "flowsheet_client.h"
-#include "utils.h"
 #include "state_machine.h"
-#include <WiFiSSLClient.h>
+#include "mgmt_protocol.h"
+#include "mgmt_client.h"
 
-// ========== Global State ==========
+// ========== Global state ==========
 
-Context ctx = { BOOTING, -1, 0, 0 };
-unsigned long lastNtpSync = 0;
+Context ctx = { BOOTING, false, false, TRANSPORT_NONE, false, 0, 0 };
+
+// Telemetry
+unsigned int reconnectCount = 0;
+unsigned int buttonPressCount = 0;  // HTTP-fallback parity; reset after each heartbeat
+unsigned long loopMaxMs = 0;
 
 // ========== Modules ==========
 
 RelayMonitor relayMonitor(RELAY_PIN, STATUS_LED_PIN, DEBOUNCE_MS);
+ButtonMonitor buttonMonitor(BUTTON_PIN, DEBOUNCE_MS);
 WifiManager wifiManager(WIFI_SSID, WIFI_PASS, WIFI_RETRY_INTERVAL_MS);
-AzuraCastClient azuracast(AZURACAST_HOST, AZURACAST_PORT, AZURACAST_PATH);
-FlowsheetClient flowsheet(TUBAFRENZY_HOST, TUBAFRENZY_PORT, AUTO_DJ_API_KEY);
+MgmtClient mgmt(ORCHESTRATOR_HOST, ORCHESTRATOR_PORT, ORCHESTRATOR_WS_PATH,
+                ORCHESTRATOR_HB_PATH, ORCHESTRATOR_CMD_PATH, AUTO_DJ_KEY, ORCHESTRATOR_USE_TLS);
 
-// ========== Logging ==========
+// ========== Helpers ==========
 
 void logTransition(State prev, State next) {
     if (prev != next) {
@@ -48,110 +51,113 @@ void logTransition(State prev, State next) {
     }
 }
 
+HeartbeatFields makeHeartbeat(const Context& c, const Inputs& in) {
+    HeartbeatFields f;
+    f.state = stateName(c.state);
+    f.transport = c.transport == TRANSPORT_ETHERNET ? "ethernet" : "wifi";
+    f.uptime_s = in.currentMillis / 1000;
+    f.wifi_rssi_null = c.transport == TRANSPORT_ETHERNET;
+    f.wifi_rssi = (long)WiFi.RSSI();
+    f.free_ram = 0;  // Giga/Mbed: heap stats not reported here (telemetry only)
+    f.firmware_version = FIRMWARE_VERSION;
+    f.config_hash = "";
+    f.loop_max_ms = loopMaxMs;
+    f.reconnect_count = reconnectCount;
+    f.tracks_detected = 0;  // reporter model: orchestrator owns track detection
+    f.tracks_posted = 0;
+    f.errors_since_boot = 0;
+    f.button_press_count = buttonPressCount;
+    f.relay_auto_dj_active = c.relayAutoDJActive;
+    return f;
+}
+
 // ========== Setup ==========
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial && millis() < 3000); // Wait up to 3s for Serial
+    while (!Serial && millis() < 3000);
     Serial.println();
-    Serial.println("=== WXYC Auto DJ Arduino Switch ===");
+    Serial.println("=== WXYC Auto DJ Reporter ===");
 
-    pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(STATUS_LED_PIN, OUTPUT);
     relayMonitor.setUp();
-
-    ctx.state = CONNECTING_WIFI;
-    ctx.retryCount = 0;
-    Serial.print("[State] BOOTING -> CONNECTING_WIFI");
-    Serial.println();
-
+    buttonMonitor.setUp();
     wifiManager.setUp();
 
-    if (wifiManager.isConnected()) {
-        lastNtpSync = millis();
-        Serial.print("[Time] Epoch: ");
-        Serial.println(wifiManager.getEpochTime());
-        ctx.state = IDLE;
-        ctx.retryCount = 0;
-        Serial.println("[State] CONNECTING_WIFI -> IDLE");
+    if (wifiManager.isConnected() && mgmt.connectWs()) {
+        reconnectCount++;
     }
 }
 
-// ========== Main Loop ==========
+// ========== Main loop ==========
 
 void loop() {
-    // Always update hardware monitors
+    unsigned long loopStart = millis();
+
     relayMonitor.update();
+    buttonMonitor.update();
     wifiManager.update();
+    mgmt.poll();
 
-    // Heartbeat LED
-    digitalWrite(LED_BUILTIN, (millis() / 1000) % 2 == 0 ? HIGH : LOW);
+    bool wifiUp = wifiManager.isConnected();
+    bool channelUp = mgmt.channelUp();
 
-    // Periodic NTP re-sync
-    if (wifiManager.isConnected() && (millis() - lastNtpSync > NTP_SYNC_INTERVAL_MS)) {
-        lastNtpSync = millis();
-        Serial.print("[Time] NTP re-sync, epoch: ");
-        Serial.println(wifiManager.getEpochTime());
-    }
-
-    // ---- GATHER INPUTS ----
-    Inputs inputs;
-    inputs.relayStateChanged = relayMonitor.stateChanged();
-    inputs.autoDJActive = relayMonitor.isAutoDJActive();
-    inputs.wifiConnected = wifiManager.isConnected();
-    inputs.epochTime = wifiManager.getEpochTime();
-    inputs.currentMillis = millis();
-    inputs.pollIntervalMs = POLL_INTERVAL_MS;
-    inputs.maxRetries = MAX_RETRIES;
-    inputs.retryBackoffMs = RETRY_BACKOFF_MS;
-
-    // Default I/O results
-    inputs.startShowResult = -1;
-    inputs.endShowResult = false;
-    inputs.pollNewTrack = false;
-    inputs.pollLiveDJ = false;
-
-    // ---- PRE-TICK I/O ----
-    switch (ctx.state) {
-        case STARTING_SHOW: {
-            unsigned long hourMs = currentHourMs(inputs.epochTime);
-            if (hourMs > 0) {
-                WiFiSSLClient ssl;
-                inputs.startShowResult = flowsheet.startShow(ssl, hourMs);
-            }
-            break;
+    // Reconnect the management channel if the network is up but the channel dropped.
+    if (wifiUp && !channelUp) {
+        if (mgmt.connectWs()) {
+            reconnectCount++;
+            channelUp = mgmt.channelUp();
         }
-        case AUTO_DJ_ACTIVE:
-            if (inputs.currentMillis - ctx.lastPollTime >= POLL_INTERVAL_MS) {
-                WiFiSSLClient ssl;
-                inputs.pollNewTrack = azuracast.poll(ssl);
-                inputs.pollLiveDJ = azuracast.isLiveDJ();
-                inputs.artist = azuracast.getArtist();
-                inputs.title = azuracast.getTitle();
-                inputs.album = azuracast.getAlbum();
-            }
-            break;
-        case ENDING_SHOW: {
-            WiFiSSLClient ssl;
-            inputs.endShowResult = flowsheet.endShow(ssl, ctx.radioShowID);
-            break;
-        }
-        default:
-            break;
     }
 
-    // ---- TICK ----
-    State prevState = ctx.state;
-    TickResult result = tick(ctx, inputs);
-    ctx = result.context;
-    logTransition(prevState, ctx.state);
+    // ---- Gather inputs ----
+    Inputs in;
+    in.relayChanged = relayMonitor.stateChanged();
+    in.relayAutoDJActive = relayMonitor.isAutoDJActive();
+    in.buttonPressed = buttonMonitor.pressed();
+    in.ethernetLinkUp = false;  // Ethernet shield: Phase 2
+    in.wifiConnected = wifiUp;
+    in.channelUp = channelUp;
 
-    // ---- POST-TICK I/O ----
-    if (result.addEntry) {
-        WiFiSSLClient ssl;
-        flowsheet.addEntry(ssl, ctx.radioShowID, result.addEntryHourMs,
-            result.addEntryArtist, result.addEntryTitle, result.addEntryAlbum);
+    String cmdId;
+    in.gotCommand = mgmt.takeCommand(&in.commandAction, &cmdId);
+    if (!in.gotCommand) in.commandAction = CMD_NONE;
+    in.gotActiveResult = mgmt.takeActiveResult(&in.activeResult);
+
+    in.currentMillis = millis();
+    in.heartbeatIntervalMs = WS_HEARTBEAT_MS;
+    in.retryBackoffMs = RETRY_BACKOFF_MS;
+    in.maxRetries = MAX_RETRIES;
+
+    if (in.buttonPressed) buttonPressCount++;
+
+    // ---- Tick (pure) ----
+    State prev = ctx.state;
+    TickResult r = tick(ctx, in);
+    ctx = r.context;
+    logTransition(prev, ctx.state);
+
+    // ---- Post-tick I/O (ordered) ----
+    if (r.sendAck) {
+        mgmt.send(buildAck(cmdId, r.ackStatus));
     }
-    if (result.delayMs > 0) {
-        delay(result.delayMs);
+    if (r.sendButtonToggle) {
+        mgmt.send(buildButtonToggle(wifiManager.getEpochTime()));
     }
+    if (r.sendHeartbeat) {
+        mgmt.send(buildHeartbeat(makeHeartbeat(ctx, in)));
+        buttonPressCount = 0;  // reset the parity counter after reporting
+    }
+    if (r.doRestart) {
+        NVIC_SystemReset();
+    }
+    if (r.setLed >= 0) {
+        digitalWrite(STATUS_LED_PIN, r.setLed ? HIGH : LOW);
+    }
+    if (r.delayMs > 0) {
+        delay(r.delayMs);
+    }
+
+    unsigned long elapsed = millis() - loopStart;
+    if (elapsed > loopMaxMs) loopMaxMs = elapsed;
 }

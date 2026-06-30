@@ -1,396 +1,227 @@
 #include <gtest/gtest.h>
 #include "state_machine.h"
-#include "utils.h"
+#include "test_helpers.h"
 
-// ========== Helpers ==========
+// Reporter state machine: connectivity + LED, no show lifecycle.
 
-Context makeContext(State state, int radioShowID = -1, int retryCount = 0,
-                    unsigned long lastPollTime = 0) {
-    Context ctx;
-    ctx.state = state;
-    ctx.radioShowID = radioShowID;
-    ctx.retryCount = retryCount;
-    ctx.lastPollTime = lastPollTime;
-    return ctx;
-}
-
-Inputs makeInputs() {
+static Inputs defaultInputs() {
     Inputs in;
-    in.relayStateChanged = false;
-    in.autoDJActive = false;
-    in.wifiConnected = true;
-    in.epochTime = 1705347000UL; // valid NTP time
-    in.currentMillis = 100000;
-    in.startShowResult = -1;
-    in.endShowResult = false;
-    in.pollNewTrack = false;
-    in.pollLiveDJ = false;
-    in.pollIntervalMs = 20000;
-    in.maxRetries = 3;
+    in.relayChanged = false;
+    in.relayAutoDJActive = true;
+    in.buttonPressed = false;
+    in.ethernetLinkUp = false;
+    in.wifiConnected = false;
+    in.channelUp = false;
+    in.gotCommand = false;
+    in.commandAction = CMD_NONE;
+    in.gotActiveResult = false;
+    in.activeResult = false;
+    in.currentMillis = 1000;
+    in.heartbeatIntervalMs = 30000;
     in.retryBackoffMs = 2000;
+    in.maxRetries = 3;
     return in;
 }
 
-// ========== BOOTING ==========
-
-TEST(StateMachine, BootingStaysInBooting) {
-    Context ctx = makeContext(BOOTING);
-    Inputs in = makeInputs();
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, BOOTING);
-    EXPECT_FALSE(r.addEntry);
-    EXPECT_EQ(r.delayMs, 0UL);
+static Context connectedCtx() {
+    Context c;
+    c.state = CONNECTED;
+    c.relayAutoDJActive = true;
+    c.orchestratorActive = false;
+    c.transport = TRANSPORT_ETHERNET;
+    c.channelUp = true;
+    c.retryCount = 0;
+    c.lastHeartbeatMs = 1000;
+    return c;
 }
 
-// ========== CONNECTING_WIFI ==========
+// Inputs that keep a CONNECTED ethernet context connected.
+static Inputs connectedInputs() {
+    Inputs in = defaultInputs();
+    in.ethernetLinkUp = true;
+    in.channelUp = true;
+    return in;
+}
 
-TEST(StateMachine, ConnectingWifiToIdleWhenConnectedNoPriorShow) {
-    Context ctx = makeContext(CONNECTING_WIFI);
-    Inputs in = makeInputs();
+TEST(StateMachine, BootingToConnecting) {
+    Context ctx;
+    ctx.state = BOOTING;
+    ctx.retryCount = 5;
+    TickResult r = tick(ctx, defaultInputs());
+    EXPECT_EQ(r.context.state, CONNECTING);
+    EXPECT_EQ(r.context.retryCount, 0);
+}
+
+TEST(StateMachine, ConnectingToConnectedEthernet) {
+    Context ctx;
+    ctx.state = CONNECTING;
+    ctx.retryCount = 1;
+    Inputs in = defaultInputs();
+    in.ethernetLinkUp = true;
+    in.channelUp = true;
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTED);
+    EXPECT_EQ(r.context.transport, TRANSPORT_ETHERNET);
+    EXPECT_EQ(r.context.retryCount, 0);
+}
+
+TEST(StateMachine, ConnectingToConnectedWiFi) {
+    Context ctx;
+    ctx.state = CONNECTING;
+    Inputs in = defaultInputs();
+    in.ethernetLinkUp = false;
     in.wifiConnected = true;
-
     TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTED);
+    EXPECT_EQ(r.context.transport, TRANSPORT_WIFI);
+}
 
-    EXPECT_EQ(r.context.state, IDLE);
+TEST(StateMachine, ConnectingRetriesThenErrors) {
+    Context ctx;
+    ctx.state = CONNECTING;
+    ctx.retryCount = 0;
+    Inputs in = defaultInputs(); // no link
+
+    TickResult r1 = tick(ctx, in);
+    EXPECT_EQ(r1.context.state, CONNECTING);
+    EXPECT_EQ(r1.context.retryCount, 1);
+    EXPECT_EQ(r1.delayMs, 2000UL);
+
+    TickResult r2 = tick(r1.context, in);
+    EXPECT_EQ(r2.context.retryCount, 2);
+    EXPECT_EQ(r2.delayMs, 4000UL);
+
+    TickResult r3 = tick(r2.context, in);
+    EXPECT_EQ(r3.context.state, ERROR_STATE);
+    EXPECT_EQ(r3.context.retryCount, 0);
+}
+
+TEST(StateMachine, ConnectedToConnectingOnChannelDrop) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.channelUp = false; // WS dropped
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTING);
+    EXPECT_EQ(r.context.transport, TRANSPORT_NONE);
+}
+
+TEST(StateMachine, RelayChangeTriggersHeartbeatAndUpdatesLevel) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.relayChanged = true;
+    in.relayAutoDJActive = false;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.sendHeartbeat);
+    EXPECT_FALSE(r.context.relayAutoDJActive);
+}
+
+TEST(StateMachine, ButtonPressTriggersSendButtonToggle) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.buttonPressed = true;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.sendButtonToggle);
+}
+
+TEST(StateMachine, CommandPauseResumeDriveLedAndAck) {
+    Context ctx = connectedCtx();
+    Inputs pause = connectedInputs();
+    pause.gotCommand = true;
+    pause.commandAction = CMD_PAUSE;
+    TickResult rp = tick(ctx, pause);
+    EXPECT_TRUE(rp.sendAck);
+    EXPECT_EQ(rp.ackStatus, ACK_OK);
+    EXPECT_FALSE(rp.context.orchestratorActive);
+    EXPECT_EQ(rp.setLed, 0);
+
+    Inputs resume = connectedInputs();
+    resume.gotCommand = true;
+    resume.commandAction = CMD_RESUME;
+    TickResult rr = tick(rp.context, resume);
+    EXPECT_TRUE(rr.context.orchestratorActive);
+    EXPECT_EQ(rr.setLed, 1);
+}
+
+TEST(StateMachine, CommandPingTriggersHeartbeatAndAck) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.gotCommand = true;
+    in.commandAction = CMD_PING;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.sendHeartbeat);
+    EXPECT_TRUE(r.sendAck);
+    EXPECT_EQ(r.ackStatus, ACK_OK);
+}
+
+TEST(StateMachine, CommandRestartSetsDoRestart) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.gotCommand = true;
+    in.commandAction = CMD_RESTART;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.doRestart);
+    EXPECT_TRUE(r.sendAck);
+}
+
+TEST(StateMachine, CommandUnknownAcksUnknownCommand) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.gotCommand = true;
+    in.commandAction = CMD_UNKNOWN;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.sendAck);
+    EXPECT_EQ(r.ackStatus, ACK_UNKNOWN_COMMAND);
+}
+
+TEST(StateMachine, AckResultActiveDrivesLed) {
+    Context ctx = connectedCtx();
+    Inputs in = connectedInputs();
+    in.gotActiveResult = true;
+    in.activeResult = true;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.context.orchestratorActive);
+    EXPECT_EQ(r.setLed, 1);
+}
+
+TEST(StateMachine, HeartbeatIntervalElapsedTriggersHeartbeat) {
+    Context ctx = connectedCtx(); // lastHeartbeatMs = 1000
+    Inputs in = connectedInputs();
+    in.currentMillis = 1000 + 30000;
+    TickResult r = tick(ctx, in);
+    EXPECT_TRUE(r.sendHeartbeat);
+    EXPECT_EQ(r.context.lastHeartbeatMs, 31000UL);
+}
+
+TEST(StateMachine, LedFollowsRelayWhenChannelDown) {
+    Context ctx;
+    ctx.state = CONNECTING;
+    ctx.relayAutoDJActive = true;
+    ctx.orchestratorActive = false;
+    ctx.transport = TRANSPORT_NONE;
+    ctx.channelUp = false;
+    ctx.retryCount = 0;
+    ctx.lastHeartbeatMs = 0;
+    Inputs in = defaultInputs();
+    in.channelUp = false;
+    in.relayAutoDJActive = true;
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.setLed, 1); // channel down -> LED mirrors relay
+}
+
+TEST(StateMachine, ErrorStateRecoversWhenLinkReturns) {
+    Context ctx;
+    ctx.state = ERROR_STATE;
+    ctx.retryCount = 0;
+    Inputs in = defaultInputs();
+    in.ethernetLinkUp = true;
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTING);
     EXPECT_EQ(r.context.retryCount, 0);
 }
 
-TEST(StateMachine, ConnectingWifiToAutoDJActiveWhenConnectedWithPriorShow) {
-    Context ctx = makeContext(CONNECTING_WIFI, /*radioShowID=*/42);
-    Inputs in = makeInputs();
-    in.wifiConnected = true;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, AUTO_DJ_ACTIVE);
-    EXPECT_EQ(r.context.radioShowID, 42);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, ConnectingWifiStaysWhenNotConnected) {
-    Context ctx = makeContext(CONNECTING_WIFI);
-    Inputs in = makeInputs();
-    in.wifiConnected = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, CONNECTING_WIFI);
-}
-
-// ========== IDLE ==========
-
-TEST(StateMachine, IdleToStartingShowOnRelayActivation) {
-    Context ctx = makeContext(IDLE);
-    Inputs in = makeInputs();
-    in.relayStateChanged = true;
-    in.autoDJActive = true;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, STARTING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, IdleStaysOnNoChange) {
-    Context ctx = makeContext(IDLE);
-    Inputs in = makeInputs();
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE);
-}
-
-TEST(StateMachine, IdleStaysOnRelayChangedButInactive) {
-    Context ctx = makeContext(IDLE);
-    Inputs in = makeInputs();
-    in.relayStateChanged = true;
-    in.autoDJActive = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE);
-}
-
-// ========== STARTING_SHOW ==========
-
-TEST(StateMachine, StartingShowSuccessSavesShowIDAndTransitions) {
-    Context ctx = makeContext(STARTING_SHOW);
-    Inputs in = makeInputs();
-    in.startShowResult = 42;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, AUTO_DJ_ACTIVE);
-    EXPECT_EQ(r.context.radioShowID, 42);
-    EXPECT_EQ(r.context.retryCount, 0);
-    EXPECT_EQ(r.context.lastPollTime, 0UL);
-}
-
-TEST(StateMachine, StartingShowErrorOnNoNTP) {
-    Context ctx = makeContext(STARTING_SHOW);
-    Inputs in = makeInputs();
-    in.epochTime = 0;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, ERROR_STATE);
-}
-
-TEST(StateMachine, StartingShowRetryOnFailure) {
-    Context ctx = makeContext(STARTING_SHOW);
-    Inputs in = makeInputs();
-    in.startShowResult = -1;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, STARTING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 1);
-    EXPECT_EQ(r.delayMs, 2000UL); // retryBackoffMs * 1
-}
-
-TEST(StateMachine, StartingShowRetryBackoffScales) {
-    Context ctx = makeContext(STARTING_SHOW, /*radioShowID=*/-1, /*retryCount=*/1);
-    Inputs in = makeInputs();
-    in.startShowResult = -1;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, STARTING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 2);
-    EXPECT_EQ(r.delayMs, 4000UL); // retryBackoffMs * 2
-}
-
-TEST(StateMachine, StartingShowErrorOnMaxRetries) {
-    Context ctx = makeContext(STARTING_SHOW, /*radioShowID=*/-1, /*retryCount=*/2);
-    Inputs in = makeInputs();
-    in.maxRetries = 3;
-    in.startShowResult = -1;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, ERROR_STATE);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-// ========== AUTO_DJ_ACTIVE ==========
-
-TEST(StateMachine, AutoDJActiveToEndingShowOnRelayDeactivation) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42);
-    Inputs in = makeInputs();
-    in.relayStateChanged = true;
-    in.autoDJActive = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, ENDING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, AutoDJActiveAddsEntryOnNewTrackNotLiveDJ) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42, /*retryCount=*/0,
-                              /*lastPollTime=*/50000);
-    Inputs in = makeInputs();
-    in.currentMillis = 100000;
-    in.pollIntervalMs = 20000;
-    in.pollNewTrack = true;
-    in.pollLiveDJ = false;
-    in.artist = "Broadcast";
-    in.title = "Echo's Answer";
-    in.album = "Tender Buttons";
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, AUTO_DJ_ACTIVE);
-    EXPECT_TRUE(r.addEntry);
-    EXPECT_EQ(r.addEntryArtist, "Broadcast");
-    EXPECT_EQ(r.addEntryTitle, "Echo's Answer");
-    EXPECT_EQ(r.addEntryAlbum, "Tender Buttons");
-    EXPECT_EQ(r.addEntryHourMs, currentHourMs(in.epochTime));
-}
-
-TEST(StateMachine, AutoDJActiveNoEntryWhenLiveDJ) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42, /*retryCount=*/0,
-                              /*lastPollTime=*/50000);
-    Inputs in = makeInputs();
-    in.currentMillis = 100000;
-    in.pollIntervalMs = 20000;
-    in.pollNewTrack = true;
-    in.pollLiveDJ = true;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, AUTO_DJ_ACTIVE);
-    EXPECT_FALSE(r.addEntry);
-}
-
-TEST(StateMachine, AutoDJActiveNoActionWhenPollIntervalNotElapsed) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42, /*retryCount=*/0,
-                              /*lastPollTime=*/95000);
-    Inputs in = makeInputs();
-    in.currentMillis = 100000;
-    in.pollIntervalMs = 20000;
-    in.pollNewTrack = true; // would trigger entry if interval had elapsed
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, AUTO_DJ_ACTIVE);
-    EXPECT_FALSE(r.addEntry);
-    EXPECT_EQ(r.context.lastPollTime, 95000UL); // unchanged
-}
-
-TEST(StateMachine, AutoDJActiveUpdatesLastPollTime) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42, /*retryCount=*/0,
-                              /*lastPollTime=*/50000);
-    Inputs in = makeInputs();
-    in.currentMillis = 100000;
-    in.pollIntervalMs = 20000;
-    in.pollNewTrack = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.lastPollTime, 100000UL);
-}
-
-TEST(StateMachine, AutoDJActiveNoEntryWhenNoNewTrack) {
-    Context ctx = makeContext(AUTO_DJ_ACTIVE, /*radioShowID=*/42, /*retryCount=*/0,
-                              /*lastPollTime=*/50000);
-    Inputs in = makeInputs();
-    in.currentMillis = 100000;
-    in.pollIntervalMs = 20000;
-    in.pollNewTrack = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_FALSE(r.addEntry);
-}
-
-// ========== ENDING_SHOW ==========
-
-TEST(StateMachine, EndingShowSuccessClearsShowAndGoesIdle) {
-    Context ctx = makeContext(ENDING_SHOW, /*radioShowID=*/42);
-    Inputs in = makeInputs();
-    in.endShowResult = true;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE);
-    EXPECT_EQ(r.context.radioShowID, -1);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, EndingShowRetryOnFailure) {
-    Context ctx = makeContext(ENDING_SHOW, /*radioShowID=*/42);
-    Inputs in = makeInputs();
-    in.endShowResult = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, ENDING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 1);
-    EXPECT_EQ(r.delayMs, 2000UL);
-}
-
-TEST(StateMachine, EndingShowForcedIdleOnMaxRetries) {
-    Context ctx = makeContext(ENDING_SHOW, /*radioShowID=*/42, /*retryCount=*/2);
-    Inputs in = makeInputs();
-    in.maxRetries = 3;
-    in.endShowResult = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE);
-    EXPECT_EQ(r.context.radioShowID, -1);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-// ========== ERROR_STATE ==========
-
-TEST(StateMachine, ErrorStateToConnectingWifiOnWifiLost) {
-    Context ctx = makeContext(ERROR_STATE);
-    Inputs in = makeInputs();
-    in.wifiConnected = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, CONNECTING_WIFI);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, ErrorStateToStartingShowWhenAutoDJActiveNoShow) {
-    Context ctx = makeContext(ERROR_STATE);
-    Inputs in = makeInputs();
-    in.autoDJActive = true;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, STARTING_SHOW);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, ErrorStateToIdleWhenAutoDJInactive) {
-    Context ctx = makeContext(ERROR_STATE);
-    Inputs in = makeInputs();
-    in.autoDJActive = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE);
-    EXPECT_EQ(r.context.retryCount, 0);
-}
-
-TEST(StateMachine, ErrorStateAlwaysReturnsDelay) {
-    Context ctx = makeContext(ERROR_STATE);
-    Inputs in = makeInputs();
-    in.autoDJActive = false; // will transition to IDLE
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, IDLE); // transition occurred
-    EXPECT_EQ(r.delayMs, in.retryBackoffMs); // delay still fires
-}
-
-// ========== WiFi Loss (parameterized) ==========
-
-class WifiLossTest : public ::testing::TestWithParam<State> {};
-
-TEST_P(WifiLossTest, TransitionsToConnectingWifiAndPreservesShowID) {
-    State state = GetParam();
-    Context ctx = makeContext(state, /*radioShowID=*/42, /*retryCount=*/2);
-    Inputs in = makeInputs();
-    in.wifiConnected = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, CONNECTING_WIFI);
-    EXPECT_EQ(r.context.radioShowID, 42);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllActiveStates,
-    WifiLossTest,
-    ::testing::Values(IDLE, STARTING_SHOW, AUTO_DJ_ACTIVE, ENDING_SHOW, ERROR_STATE)
-);
-
-TEST(StateMachine, BootingDoesNotTransitionOnWifiLoss) {
-    Context ctx = makeContext(BOOTING);
-    Inputs in = makeInputs();
-    in.wifiConnected = false;
-
-    TickResult r = tick(ctx, in);
-
-    EXPECT_EQ(r.context.state, BOOTING);
-}
-
-// ========== stateName ==========
-
-TEST(StateName, ReturnsHumanReadableNames) {
+TEST(StateMachine, StateNameMatchesEnum) {
     EXPECT_STREQ(stateName(BOOTING), "BOOTING");
-    EXPECT_STREQ(stateName(CONNECTING_WIFI), "CONNECTING_WIFI");
-    EXPECT_STREQ(stateName(IDLE), "IDLE");
-    EXPECT_STREQ(stateName(STARTING_SHOW), "STARTING_SHOW");
-    EXPECT_STREQ(stateName(AUTO_DJ_ACTIVE), "AUTO_DJ_ACTIVE");
-    EXPECT_STREQ(stateName(ENDING_SHOW), "ENDING_SHOW");
-    EXPECT_STREQ(stateName(ERROR_STATE), "ERROR");
+    EXPECT_STREQ(stateName(CONNECTING), "CONNECTING");
+    EXPECT_STREQ(stateName(CONNECTED), "CONNECTED");
+    EXPECT_STREQ(stateName(ERROR_STATE), "ERROR_STATE");
 }
