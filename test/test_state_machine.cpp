@@ -71,9 +71,34 @@ TEST(StateMachine, ConnectingToConnectedWiFi) {
     Inputs in = defaultInputs();
     in.ethernetLinkUp = false;
     in.wifiConnected = true;
+    in.channelUp = true; // CONNECTED requires a usable channel
     TickResult r = tick(ctx, in);
     EXPECT_EQ(r.context.state, CONNECTED);
     EXPECT_EQ(r.context.transport, TRANSPORT_WIFI);
+}
+
+TEST(StateMachine, ConnectingWaitsForChannelEvenWithLink) {
+    // Link up but channel not yet established -> stay CONNECTING (retry), not CONNECTED.
+    Context ctx;
+    ctx.state = CONNECTING;
+    ctx.retryCount = 0;
+    Inputs in = defaultInputs();
+    in.wifiConnected = true;
+    in.channelUp = false;
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTING);
+    EXPECT_EQ(r.context.retryCount, 1);
+}
+
+TEST(StateMachine, ConnectedWiFiToConnectingOnChannelDrop) {
+    // A WS drop over WiFi must return to CONNECTING (not stay silently CONNECTED).
+    Context ctx = connectedCtx();
+    ctx.transport = TRANSPORT_WIFI;
+    Inputs in = defaultInputs();
+    in.wifiConnected = true;
+    in.channelUp = false; // channel dropped
+    TickResult r = tick(ctx, in);
+    EXPECT_EQ(r.context.state, CONNECTING);
 }
 
 TEST(StateMachine, ConnectingRetriesThenErrors) {

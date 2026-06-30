@@ -14,16 +14,23 @@ RelayMonitor::RelayMonitor(int relayPin, int ledPin, unsigned long debounceMs)
 
 void RelayMonitor::setUp() {
     pinMode(relayPin, INPUT_PULLUP);
-    pinMode(ledPin, OUTPUT);
     debouncedState = digitalRead(relayPin);
     lastReading = debouncedState;
     ledState = debouncedState == LOW ? HIGH : LOW;
-    digitalWrite(ledPin, ledState);
+    // ledPin < 0 means "this monitor does not own an LED" (the reporter's state
+    // machine drives STATUS_LED_PIN). getLedState() still works for callers that
+    // want the relay-derived value.
+    if (ledPin >= 0) {
+        pinMode(ledPin, OUTPUT);
+        digitalWrite(ledPin, ledState);
+    }
 }
 
 void RelayMonitor::update() {
     update(millis(), digitalRead(relayPin));
-    digitalWrite(ledPin, ledState);
+    if (ledPin >= 0) {
+        digitalWrite(ledPin, ledState);
+    }
 }
 
 void RelayMonitor::update(unsigned long currentMillis, int currentReading) {
