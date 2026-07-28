@@ -4,7 +4,7 @@ This document specifies all network communication for the Auto DJ Arduino Switch
 
 ## 1. Overview
 
-> **Re-architecture note (reporter model).** The Arduino is now a **relay/button reporter**: it reports the AUX-relay state and a manual toggle button to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) over the management channel and no longer polls AzuraCast or writes flowsheets. The orchestrator owns the AzuraCast subscription and all flowsheet writes (to Backend-Service, which mirrors to tubafrenzy). Sections describing the Arduino polling AzuraCast or writing to tubafrenzy directly (notably §1.2, §2.3, §2.5, §3.2–§3.4, §6) are **historical / now orchestrator-side**; the authoritative parts for the firmware are the management channel (§3.6–§3.8), activation sources (§2.7), and the type contracts (§5).
+> **Re-architecture note (reporter model).** The Arduino is now a **relay/button reporter**: it reports the AUX-relay state and a manual toggle button to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) over the management channel and no longer polls AzuraCast or writes flowsheets. The orchestrator owns the AzuraCast subscription and all flowsheet writes, which go to **Backend-Service only** (Backend-Service — not this firmware — owns any legacy tubafrenzy mirror, for as long as that system runs). **The firmware has no tubafrenzy write path and no AzuraCast poll:** the `flowsheet_client.cpp` and `azuracast_client.cpp` modules that implemented them were **deleted** in the reporter re-architecture (commit `9facefc`). Sections below that describe the Arduino polling AzuraCast or writing to tubafrenzy directly (notably §1.2, §2.1, §2.3, §2.5, §3.2–§3.4, §4.1–§4.2, §6) — including any "Status: Implemented" markers and references to those deleted files — are **historical**: they document code that no longer exists in `main`. The authoritative parts for the current firmware are the management channel (§3.6–§3.8), activation sources (§2.7), and the type contracts (§5). Keeping the firmware free of a tubafrenzy write path is required by the [tubafrenzy decommissioning](https://github.com/WXYC/wiki/blob/main/plans/tubafrenzy-decommissioning.md) Phase 1 freeze ([WXYC/wiki#90](https://github.com/WXYC/wiki/issues/90)).
 
 ### 1.1 Purpose
 
@@ -14,14 +14,14 @@ The Auto DJ Arduino Switch is a networked embedded device that reports studio st
 
 The device will sit inside the WXYC studio, wired into the mixing board. Once deployed, every configuration change -- including the annual UNC-PSK password rotation -- would require someone to walk to the studio with a laptop, connect via USB, and reflash the firmware. There would be no way to check whether the device is alive, inspect its state, or intervene remotely. For a device designed to run unattended, this is untenable.
 
-Beyond remote access, the firmware currently only writes to one flowsheet backend ([tubafrenzy](https://github.com/WXYC/tubafrenzy)). WXYC is migrating its flowsheet infrastructure to [Backend-Service](https://github.com/WXYC/Backend-Service). Backend-Service writes are delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using JWT. The Arduino continues to write to tubafrenzy directly.
+Beyond remote access, WXYC is migrating its flowsheet infrastructure from the legacy [tubafrenzy](https://github.com/WXYC/tubafrenzy) system to [Backend-Service](https://github.com/WXYC/Backend-Service). Under the reporter model the firmware no longer writes flowsheets at all: it reports studio state to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which performs every flowsheet write against Backend-Service, authenticating as a service identity using JWT. Earlier firmware wrote to tubafrenzy directly; that path has been removed.
 
 ### 1.3 Document Scope
 
 This document covers:
 
 - All network traffic to and from the Arduino (HTTP, WebSocket, UDP)
-- Flowsheet writes to tubafrenzy (Arduino) and Backend-Service (via [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator))
+- Flowsheet writes to Backend-Service, performed by the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) (the firmware itself no longer writes flowsheets)
 - Shared type contracts via [`wxyc-shared`](https://github.com/WXYC/wxyc-shared) (`api.yaml`)
 - Authentication and credential management for all connections
 - The management server protocol (WebSocket + HTTP fallback)
@@ -65,7 +65,6 @@ flowchart TD
 
     subgraph External["External Services"]
         AZ["AzuraCast<br>remote.wxyc.org<br>(Now Playing API +<br>Centrifugo WebSocket)"]
-        TF["tubafrenzy<br>www.wxyc.info<br>(Legacy Flowsheet API)"]
         MS["Management Server<br>(auto-dj-orchestrator)<br>(WebSocket + REST)"]
         NTP["NTP Server<br>pool.ntp.org"]
     end
@@ -76,7 +75,6 @@ flowchart TD
 
     ARD -- "HTTPS GET<br>now-playing poll<br>(WiFi fallback)" --> AZ
     ARD -. "WSS<br>now-playing push<br>(Ethernet, direct)" .-> AZ
-    ARD -- "HTTPS POST<br>form-encoded" --> TF
     ARD -. "WSS / HTTPS<br>heartbeat + commands" .-> MS
     ARD -- "UDP :123<br>time sync" --> NTP
 
@@ -85,7 +83,7 @@ flowchart TD
     style MS stroke-dasharray: 5 5
 ```
 
-Dashed lines indicate planned connections not yet implemented. Solid lines represent implemented functionality.
+Dashed lines indicate planned connections not yet implemented. Solid lines represent implemented functionality. **Historical note:** this topology predates the reporter re-architecture (§1). The firmware no longer POSTs to tubafrenzy (that edge and the tubafrenzy node have been removed) and, in the reporter model, no longer polls AzuraCast directly either — the orchestrator owns the AzuraCast subscription and all flowsheet writes. The firmware's current server relationships are the orchestrator management channel and NTP.
 
 **Ethernet mode** (primary): All traffic flows through the W5500 Ethernet Shield with software TLS ([SSLClient](https://github.com/OPEnSLab-OSU/SSLClient) + [BearSSL](https://bearssl.org/)). The WebSocket to the management server stays open persistently.
 
@@ -133,9 +131,9 @@ This means:
 
 ### 2.3 Flowsheet Write Architecture
 
-The Arduino writes flowsheet entries to tubafrenzy only. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using standard JWT refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)).
+Under the reporter model the Arduino writes no flowsheet entries. Every flowsheet write is performed by the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator) against Backend-Service, authenticating as a service identity using standard JWT refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)). The table below is retained for reference: the left column is the **legacy Arduino → tubafrenzy path, now removed**; the right column is the current orchestrator path.
 
-| | Arduino → tubafrenzy | Orchestrator → Backend-Service |
+| | Legacy Arduino → tubafrenzy (removed) | Orchestrator → Backend-Service |
 |--|-----------|----------------|
 | **Content type** | `application/x-www-form-urlencoded` | `application/json` |
 | **Auth** | `X-Auto-DJ-Key` header | `Authorization: Bearer <JWT>` (service account) |
@@ -145,9 +143,9 @@ The Arduino writes flowsheet entries to tubafrenzy only. All Backend-Service com
 | **Breakpoints** | Server auto-inserts via `autoBreakpoint=true` | Client must POST explicit breakpoint entry |
 | **DJ ID** | `"0"` (string, no DJ table) | Resolved server-side from service identity |
 
-**Why the Arduino doesn't talk to Backend-Service directly**: Backend-Service uses JWT authentication with token refresh. The Arduino's constrained environment (no `jose`, limited RAM, BearSSL-only TLS) makes JWT refresh impractical. The orchestrator is a server-side Node.js service that handles JWT lifecycle naturally. This eliminates the PAT vs JWT conflict — the Arduino uses a simple shared secret (`X-Auto-DJ-Key`) for tubafrenzy and the management server, while the orchestrator handles all JWT-authenticated communication.
+**Why the Arduino doesn't talk to Backend-Service directly**: Backend-Service uses JWT authentication with token refresh. The Arduino's constrained environment (no `jose`, limited RAM, BearSSL-only TLS) makes JWT refresh impractical. The orchestrator is a server-side Node.js service that handles JWT lifecycle naturally. This eliminates the PAT vs JWT conflict — the Arduino uses a simple shared secret (`X-Auto-DJ-Key`) for the orchestrator management channel only, while the orchestrator handles all JWT-authenticated communication.
 
-**Data flow**: The orchestrator writes to Backend-Service (JWT) and mirrors to tubafrenzy (`X-Auto-DJ-Key`). The Arduino's direct tubafrenzy writes serve as a fallback path if the orchestrator is unavailable. See the [orchestrator README](https://github.com/WXYC/auto-dj-orchestrator/blob/main/README.md) for the `FLOWSHEET_BACKEND` flag that controls the orchestrator's write targets.
+**Data flow**: The orchestrator writes to Backend-Service (JWT) exclusively; any mirror to the legacy tubafrenzy system is owned by Backend-Service, not the orchestrator, and not this firmware. There is **no Arduino tubafrenzy fallback path** — that path was removed in the reporter re-architecture, and the orchestrator has no dual-backend `FLOWSHEET_BACKEND` selector (it was built Backend-only; see [auto-dj-orchestrator#1](https://github.com/WXYC/auto-dj-orchestrator/issues/1)).
 
 ### 2.4 Management Server
 
@@ -265,10 +263,10 @@ Before the orchestrator is deployed, the button is wired and debounced but has n
 
 | # | Direction | Protocol | Endpoint / Channel | Auth | Content Type | Transport | Status |
 |---|-----------|----------|-------------------|------|-------------|-----------|--------|
-| 1 | Arduino → AzuraCast | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Implemented** |
-| 2 | Arduino → tubafrenzy | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
-| 3 | Arduino → tubafrenzy | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
-| 4 | Arduino → tubafrenzy | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Implemented** |
+| 1 | ~~Arduino → AzuraCast~~ | HTTPS GET | `/api/nowplaying_static/main.json` | None (public) | JSON response | Both | **Removed** (reporter re-arch) |
+| 2 | ~~Arduino → tubafrenzy~~ | HTTPS POST | `/playlists/startRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Removed** (reporter re-arch) |
+| 3 | ~~Arduino → tubafrenzy~~ | HTTPS POST | `/playlists/flowsheetEntryAdd` | `X-Auto-DJ-Key` | Form-encoded | Both | **Removed** (reporter re-arch) |
+| 4 | ~~Arduino → tubafrenzy~~ | HTTPS POST | `/playlists/finishRadioShow` | `X-Auto-DJ-Key` | Form-encoded | Both | **Removed** (reporter re-arch) |
 | 5 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet/join` | Bearer JWT | JSON | N/A (server-side) | Planned |
 | 6 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet` | Bearer JWT | JSON | N/A (server-side) | Planned |
 | 7 | Orchestrator → Backend-Service | HTTPS POST | `/flowsheet/end` | Bearer JWT | JSON | N/A (server-side) | Planned |
@@ -284,11 +282,13 @@ Before the orchestrator is deployed, the button is wired and debounced but has n
 | 17 | dj-site → Orchestrator | HTTPS POST | `/api/auto-dj/deactivate` | Better Auth JWT | JSON | N/A | Planned |
 | 18 | dj-site → Orchestrator | HTTPS GET | `/api/auto-dj/status` | Better Auth JWT | JSON response | N/A | Planned |
 
+Rows 1–4 are struck through and marked **Removed**: they described the firmware's direct AzuraCast poll and tubafrenzy writes, both deleted in the reporter re-architecture (§1). The now-playing subscription and all flowsheet writes are now the orchestrator's; §3.2–§3.4 below are retained as historical / orchestrator-contract reference.
+
 ### 3.2 Outbound HTTP: AzuraCast Now Playing
 
-**Status**: Implemented (in [`azuracast_client.cpp`](../auto-dj-arduino-switch/azuracast_client.cpp))
+**Status**: Removed from the firmware in the reporter re-architecture (`azuracast_client.cpp` was deleted). The orchestrator now owns the AzuraCast now-playing subscription; the protocol below documents how the firmware used to poll and remains a useful reference for the orchestrator's equivalent poll.
 
-The Arduino polls AzuraCast's static now-playing endpoint to detect track changes.
+Historically, the Arduino polled AzuraCast's static now-playing endpoint to detect track changes.
 
 | Field | Value |
 |-------|-------|
@@ -323,9 +323,9 @@ filter["live"]["is_live"] = true;
 
 ### 3.3 Outbound HTTP: tubafrenzy Flowsheet Operations
 
-**Status**: Implemented (in [`flowsheet_client.cpp`](../auto-dj-arduino-switch/flowsheet_client.cpp))
+**Status**: Removed from the firmware in the reporter re-architecture (`flowsheet_client.cpp` was deleted). The firmware performs no tubafrenzy writes; the orchestrator performs all flowsheet writes against Backend-Service. The tubafrenzy protocol below is retained as historical reference only.
 
-All tubafrenzy requests are form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success (the servlet redirects to a JSP page, but the Arduino does not follow the redirect). [`ArduinoHttpClient`](https://github.com/arduino-libraries/ArduinoHttpClient) does not follow redirects by default, which is the desired behavior.
+Historically, all tubafrenzy requests were form-encoded POSTs authenticated by the `X-Auto-DJ-Key` header. The server responds with 302 redirects on success (the servlet redirects to a JSP page, but the Arduino does not follow the redirect). [`ArduinoHttpClient`](https://github.com/arduino-libraries/ArduinoHttpClient) does not follow redirects by default, which is the desired behavior.
 
 #### 3.3.1 Start Show
 
@@ -492,7 +492,7 @@ Unlike tubafrenzy (which auto-inserts breakpoints via `autoBreakpoint=true`), Ba
 
 #### 3.4.5 Show Lifecycle Comparison
 
-The full show lifecycle for both backends, showing the key protocol differences. The Arduino writes to tubafrenzy directly; the orchestrator handles Backend-Service:
+The full show lifecycle, showing the key protocol differences between the **historical** Arduino → tubafrenzy flow (top rect — removed in the reporter re-architecture) and the current orchestrator → Backend-Service flow:
 
 ```mermaid
 sequenceDiagram
@@ -502,7 +502,7 @@ sequenceDiagram
     participant BS as Backend-Service
 
     rect rgb(200, 220, 240)
-    Note over Arduino,TF: Arduino → tubafrenzy (live)
+    Note over Arduino,TF: Arduino → tubafrenzy (historical — removed)
     Arduino->>TF: POST /playlists/startRadioShow<br/>(form-encoded, X-Auto-DJ-Key)
     TF-->>Arduino: 302 Location: ...radioShowID=12345
 
@@ -807,11 +807,11 @@ The `result` field is an optional extension to the `AutoDJAck` schema. It is pre
 | `wifi_ssid` / `wifi_pass` | No | Requires restart (see below) |
 | `api_key` | Yes | Takes effect on next HTTP request |
 | `utc_offset` | Yes | Takes effect on next `currentHourMs()` call |
-| `flowsheet_backend` | No | Reserved for future use |
+| `flowsheet_backend` | No | Obsolete (reporter model — the firmware writes no flowsheets) |
 
 **Why `wifi_ssid` / `wifi_pass` require restart**: WiFi credentials are consumed by `WiFi.begin(ssid, password)` during the connection sequence. The WiFi module's firmware holds onto the credentials it was given at `begin()` -- updating the `RuntimeConfig` struct alone doesn't reconnect. Calling `WiFi.disconnect()` + `WiFi.begin()` with new credentials would block the `loop()` for up to 36 seconds (the Giga R1 firmware bug). A restart sequences this cleanly through the normal boot path. Since WiFi is only the fallback transport (Section 2.2), this is low-urgency.
 
-**`flowsheet_backend`**: Reserved for future use. The Arduino currently writes to tubafrenzy only. The dual-backend concept (writing to both tubafrenzy and Backend-Service) is handled by the orchestrator server-side. See [Section 2.3](#23-flowsheet-write-architecture).
+**`flowsheet_backend`**: Obsolete under the reporter model. The firmware no longer writes flowsheets, so it has no flowsheet-backend selector. All flowsheet writes are performed by the orchestrator against Backend-Service. See [Section 2.3](#23-flowsheet-write-architecture).
 
 #### 3.6.5 Keepalive Strategy
 
@@ -1001,7 +1001,7 @@ The orchestrator ([auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchest
 | **Request body** | None |
 | **Response (200)** | `AutoDJStatus` JSON (see below) |
 
-Activates the auto-DJ system. The orchestrator starts a show on the configured flowsheet backend(s) and begins subscribing to AzuraCast for track changes.
+Activates the auto-DJ system. The orchestrator starts a show on Backend-Service and begins subscribing to AzuraCast for track changes.
 
 **Error responses**:
 - `409 Conflict`: Auto-DJ is already active. Response body includes the current `AutoDJStatus`.
@@ -1009,7 +1009,7 @@ Activates the auto-DJ system. The orchestrator starts a show on the configured f
 - `403 Forbidden`: Insufficient permissions.
 
 **Side effects**:
-- Orchestrator calls `POST /flowsheet/join` on Backend-Service (and/or `startRadioShow` on tubafrenzy) to create a show.
+- Orchestrator calls `POST /flowsheet/join` on Backend-Service to create a show.
 - Orchestrator begins subscribing to AzuraCast now-playing feed.
 - If the Arduino is connected via the management channel, the orchestrator sends it a `resume` command (in case it was paused).
 
@@ -1030,7 +1030,7 @@ Deactivates the auto-DJ system. The orchestrator ends the current show and stops
 - `403 Forbidden`: Insufficient permissions.
 
 **Side effects**:
-- Orchestrator calls `POST /flowsheet/end` on Backend-Service (and/or `finishRadioShow` on tubafrenzy).
+- Orchestrator calls `POST /flowsheet/end` on Backend-Service.
 - Orchestrator stops subscribing to AzuraCast.
 - If the Arduino is connected, the orchestrator sends it a `pause` command.
 
@@ -1118,17 +1118,16 @@ The `device` block is `null` if the Arduino has never connected to the orchestra
 
 | Credential | Stored in | Authenticates to | Rotation frequency |
 |-----------|----------|------------------|-------------------|
-| WiFi password (`WIFI_PASS`) | [`secrets.h`](../auto-dj-arduino-switch/secrets.h) (compile-time), KVStore (runtime, after Phase 1) | UNC-PSK WiFi network | Annually (UNC policy) |
-| tubafrenzy API key (`AUTO_DJ_API_KEY`) | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | tubafrenzy flowsheet API | Manual (operator-initiated) |
-| Management server key | Same as `AUTO_DJ_API_KEY` (shared) | Management server WebSocket + HTTP | Same as tubafrenzy API key |
+| WiFi password (`WIFI_PASS`) | [`secrets.h`](../auto-dj-arduino-switch/secrets.h.example) (compile-time), KVStore (runtime, after Phase 1) | UNC-PSK WiFi network | Annually (UNC policy) |
+| Orchestrator management-channel key (`AUTO_DJ_KEY`) | `secrets.h` (compile-time), KVStore (runtime, after Phase 1) | Orchestrator management channel (WebSocket upgrade + HTTP fallback), sent as the `X-Auto-DJ-Key` header | Manual (operator-initiated) |
 
-The Arduino has no Backend-Service credentials. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using JWT with standard token refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)).
+Under the reporter model the firmware holds only these two credentials. The pre-re-architecture firmware also carried a tubafrenzy API key (the same `X-Auto-DJ-Key` value) for direct tubafrenzy writes; that credential and its write path have been removed. The Arduino has no Backend-Service credentials. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity using JWT with standard token refresh (see [unified-auth-system.md](https://github.com/WXYC/docs/blob/main/unified-auth-system.md)).
 
-### 4.2 tubafrenzy Authentication
+### 4.2 tubafrenzy Authentication (historical)
 
-**Status**: Implemented (in `flowsheet_client.cpp`)
+**Status**: Removed from the firmware in the reporter re-architecture (`flowsheet_client.cpp` was deleted). The firmware no longer authenticates to tubafrenzy. The description below is historical: it documents how the pre-re-architecture firmware authenticated its (now-removed) tubafrenzy writes and how tubafrenzy validated the key.
 
-The Arduino authenticates to tubafrenzy by sending the `X-Auto-DJ-Key` header with every request. The server validates this via `XYCCatalogServlet.isAutoDJRequest()`:
+Historically, the Arduino authenticated to tubafrenzy by sending the `X-Auto-DJ-Key` header with every request. The server validated this via `XYCCatalogServlet.isAutoDJRequest()`:
 
 ```java
 protected boolean isAutoDJRequest(HttpServletRequest request) {
@@ -1159,7 +1158,7 @@ Key details:
 
 The Arduino does not authenticate to Backend-Service directly. All Backend-Service communication is delegated to the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which authenticates as a service identity (`auto-dj-orchestrator@services.wxyc.org`) using standard JWT refresh — sign in at startup, cache token, refresh before expiry.
 
-This eliminates the PAT vs JWT conflict: the Arduino's constrained environment cannot perform JWT refresh, but the orchestrator (a server-side Node.js service) handles it naturally. The Arduino's credential inventory is simplified to WiFi password, tubafrenzy API key, and management server key.
+This eliminates the PAT vs JWT conflict: the Arduino's constrained environment cannot perform JWT refresh, but the orchestrator (a server-side Node.js service) handles it naturally. Under the reporter model the Arduino's credential inventory is just the WiFi password and the orchestrator management-channel key.
 
 #### Orchestrator service account set-up (one-time, by an admin)
 
@@ -1868,11 +1867,13 @@ If a formal WebSocket contract is needed later, [AsyncAPI](https://www.asyncapi.
 
 ---
 
-## 6. Flowsheet Client
+## 6. Flowsheet Client (historical)
 
-### 6.1 Architecture
+> **This entire section is historical.** It documents the firmware's original on-device tubafrenzy flowsheet client (`flowsheet_client.cpp` / `TubafrenzyBackend`), which was **deleted** in the reporter re-architecture (§1). The current firmware writes no flowsheets; the orchestrator performs every flowsheet write against Backend-Service. The material below is retained as a record of the removed client and as reference for the orchestrator's equivalent operations.
 
-The Arduino writes to tubafrenzy only. The dual-backend concept (writing to both tubafrenzy and Backend-Service) is the responsibility of the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which controls the `FLOWSHEET_BACKEND` flag server-side. See [Section 2.3](#23-flowsheet-write-architecture).
+### 6.1 Architecture (historical)
+
+The pre-re-architecture firmware wrote to tubafrenzy only. There was no on-device dual-backend selector. Writing to Backend-Service is the responsibility of the [auto-dj-orchestrator](https://github.com/WXYC/auto-dj-orchestrator), which was built Backend-only — there is no `FLOWSHEET_BACKEND` flag (see [auto-dj-orchestrator#1](https://github.com/WXYC/auto-dj-orchestrator/issues/1)). See [Section 2.3](#23-flowsheet-write-architecture).
 
 | Setting | Value |
 |---------|-------|
@@ -1882,9 +1883,9 @@ The Arduino writes to tubafrenzy only. The dual-backend concept (writing to both
 | **DJ ID** | `"0"` (string, no DJ table) |
 | **Content type** | `application/x-www-form-urlencoded` |
 
-### 6.2 tubafrenzy Client (existing)
+### 6.2 tubafrenzy Client (removed)
 
-Implemented in `flowsheet_client.cpp` and [`flowsheet_client.h`](../auto-dj-arduino-switch/flowsheet_client.h). See [Section 3.3](#33-outbound-http-tubafrenzy-flowsheet-operations) for the full protocol specification.
+Was implemented in `flowsheet_client.cpp` / `flowsheet_client.h`, both deleted in the reporter re-architecture. See [Section 3.3](#33-outbound-http-tubafrenzy-flowsheet-operations) for the historical protocol specification.
 
 Three operations:
 
@@ -1952,7 +1953,7 @@ The orchestrator implements the same four logical operations:
 
 ### 6.5 Client Architecture on Arduino
 
-The Arduino uses a single `TubafrenzyBackend` implementation. The `FlowsheetBackend` interface is retained for testability (the `FakeClient` test harness implements it).
+The pre-re-architecture firmware used a single `TubafrenzyBackend` implementation behind a `FlowsheetBackend` interface. Both were removed with the on-device flowsheet client; the current firmware has no flowsheet backend.
 
 ```mermaid
 classDiagram
